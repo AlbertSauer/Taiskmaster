@@ -24,6 +24,6 @@ app.add_middleware(
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
+@app.get("/")
+def root():
+    return {"message": "Welcome to Taiskmaster API. Visit /docs for API documentation."}

@@ -1,6 +1,6 @@
-# TaiskmasterVR
+# Taiskmaster
 
-TaiskmasterVR is a task and schedule planner built with React, Vite, TypeScript, Tailwind CSS, and FastAPI.
+Taiskmaster is a task and schedule planner built with React, Vite, TypeScript, Tailwind CSS, and FastAPI.
 
 ## Current Status
 
@@ -12,8 +12,8 @@ The app currently includes:
 - Mini calendar and daily planning layout
 - Google Calendar import flow
 - Rule-based schedule optimization
-- AI recommendations with categories like family, sports, hobbies, meditation, reading, studying, and fun
-- Floating AI assistant with friendly scheduling-focused responses
+- Smart recommendations with categories like family, sports, hobbies, meditation, reading, studying, and fun
+- Floating planning assistant with friendly scheduling-focused responses
 - Online mode through the FastAPI backend and offline fallback mode in the frontend
 - Local persistence fallback when the backend is not connected
 
@@ -40,6 +40,8 @@ uvicorn app.main:app --reload --port 8000
 
 The backend runs on `http://localhost:8000`.
 
+You can view the API documentation at `http://localhost:8000/docs`.
+
 ## Environment
 
 Frontend:
@@ -57,7 +59,7 @@ Create `backend/.env` with values like:
 ```env
 DATABASE_URL=sqlite:///./dev.db
 ALLOWED_ORIGINS=http://localhost:8080
-OPENAI_API_KEY=your-openai-api-key
+OPENAI_API_KEY=your-provider-api-key
 ```
 
 If `VITE_API_URL` is not set, the frontend stays in offline mode and uses its local fallback behavior.
@@ -89,7 +91,7 @@ Expected response:
 {"status":"ok"}
 ```
 
-## AI Notes
+## Assistant Notes
 
 - The floating assistant can add tasks, optimize the schedule, answer planning questions, and use a warmer scheduling-coach tone.
 - The backend chat route lives at `/api/chat`.
@@ -98,7 +100,7 @@ Expected response:
 
 ## Key Files
 
-- [src/components/AIAssistant.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/AIAssistant.tsx): floating assistant UI and frontend fallback behavior
+- [src/components/AssistantPanel.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/AssistantPanel.tsx): floating assistant UI and frontend fallback behavior
 - [src/components/TaskCard.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/TaskCard.tsx): task card UI
 - [src/components/TaskDialog.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/TaskDialog.tsx): task create/edit dialog
 - [src/lib/taskStore.ts](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/lib/taskStore.ts): task state, persistence, sorting, and schedule optimization

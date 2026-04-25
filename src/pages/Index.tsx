@@ -5,7 +5,7 @@ import { TaskCard } from "@/components/TaskCard";
 import { TaskDialog } from "@/components/TaskDialog";
 import { GoogleCalendarImportDialog } from "@/components/GoogleCalendarImportDialog";
 import { MiniCalendar } from "@/components/MiniCalendar";
-import { AIAssistant } from "@/components/AIAssistant";
+import { AssistantPanel } from "@/components/AssistantPanel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -115,7 +115,7 @@ const Index = () => {
 
   const handleRecommend = async () => {
     if (!API_BASE) {
-      toast.error("Live AI recommendations need the backend to be connected.");
+      toast.error("Live recommendations need the backend to be connected.");
       return;
     }
 
@@ -146,7 +146,7 @@ const Index = () => {
       setRecommendations(data.recommendations ?? []);
       toast.success("Recommendations ready");
     } catch {
-      toast.error("AI recommendations are unavailable right now.");
+      toast.error("Recommendations are unavailable right now.");
     } finally {
       setLoadingRecommendations(false);
     }
@@ -166,125 +166,106 @@ const Index = () => {
       <section className="relative">
         <div className="absolute inset-0 bg-gradient-glow pointer-events-none" />
         <div className="container relative pt-12 pb-8">
-          <div className="max-w-2xl animate-slide-up">
-            <p className="mb-2 text-sm font-medium text-primary">Good to see you</p>
-            <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight">
-              Your day, organized.
-            </h1>
-            <p className="mt-2 text-muted-foreground">
-              {stats.today > 0
-                ? `${stats.today} task${stats.today === 1 ? "" : "s"} on for today${stats.high > 0 ? ` · ${stats.high} high priority` : ""}.`
-                : "No tasks scheduled today. A perfect time to plan ahead."}
-            </p>
+          <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
+            <div>
+              <div className="max-w-2xl animate-slide-up">
+                <p className="mb-2 text-sm font-medium text-primary">Good to see you</p>
+                <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight">
+                  Your day, organized.
+                </h1>
+                <p className="mt-2 text-muted-foreground">
+                  {stats.today > 0
+                    ? `${stats.today} task${stats.today === 1 ? "" : "s"} on for today${stats.high > 0 ? ` · ${stats.high} high priority` : ""}.`
+                    : "No tasks scheduled today. A perfect time to plan ahead."}
+                </p>
 
-            <div className="mt-5 flex flex-wrap gap-2">
-              <Button variant="hero" size="lg" onClick={handleOptimize}>
-                <Sparkles className="h-4 w-4" />
-                Optimize schedule
-              </Button>
-              <Button variant="secondary" size="lg" onClick={handleRecommend} disabled={loadingRecommendations}>
-                <HeartHandshake className="h-4 w-4" />
-                {loadingRecommendations ? "Finding ideas..." : "Get AI recommendations"}
-              </Button>
-              <Button variant="secondary" size="lg" onClick={() => setImportOpen(true)}>
-                <UploadCloud className="h-4 w-4" />
-                Import calendar
-              </Button>
-              <Button variant="outline" size="lg" onClick={handleNew}>
-                Add task
-              </Button>
+                <div className="mt-5 flex flex-wrap gap-2">
+                  <Button variant="hero" size="lg" onClick={handleOptimize}>
+                    <Sparkles className="h-4 w-4" />
+                    Optimize schedule
+                  </Button>
+                  <Button variant="secondary" size="lg" onClick={handleRecommend} disabled={loadingRecommendations}>
+                    <HeartHandshake className="h-4 w-4" />
+                    {loadingRecommendations ? "Finding ideas..." : "Get recommendations"}
+                  </Button>
+                  <Button variant="secondary" size="lg" onClick={() => setImportOpen(true)}>
+                    <UploadCloud className="h-4 w-4" />
+                    Import calendar
+                  </Button>
+                  <Button variant="outline" size="lg" onClick={handleNew}>
+                    Add task
+                  </Button>
+                </div>
+              </div>
+
+              <div className="mt-8 grid grid-cols-2 gap-3 lg:grid-cols-4">
+                <StatCard icon={<CalIcon className="h-4 w-4" />} label="Today" value={stats.today} />
+                <StatCard icon={<Flag className="h-4 w-4" />} label="High priority" value={stats.high} />
+                <StatCard icon={<CheckCircle2 className="h-4 w-4" />} label="Completed" value={stats.done} />
+                <StatCard icon={<MapPin className="h-4 w-4" />} label="All tasks" value={stats.total} />
+              </div>
             </div>
-          </div>
 
-          {/* Stats */}
-          <div className="mt-8 grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <StatCard icon={<CalIcon className="h-4 w-4" />} label="Today" value={stats.today} />
-            <StatCard icon={<Flag className="h-4 w-4" />} label="High priority" value={stats.high} />
-            <StatCard icon={<CheckCircle2 className="h-4 w-4" />} label="Completed" value={stats.done} />
-            <StatCard icon={<MapPin className="h-4 w-4" />} label="All tasks" value={stats.total} />
+            <div className="lg:justify-self-end">
+              <MiniCalendar tasks={tasks} selected={selectedDate} onSelect={setSelectedDate} />
+            </div>
           </div>
         </div>
       </section>
 
-      {/* Main grid */}
       <main className="container pb-24">
-        <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
-          {/* Tasks column */}
-          <div>
-            <RecommendationPanel
-              recommendations={recommendations}
-              loading={loadingRecommendations}
-              onRefresh={handleRecommend}
-              onAdd={handleAddRecommendation}
+        <RecommendationPanel
+          recommendations={recommendations}
+          loading={loadingRecommendations}
+          onRefresh={handleRecommend}
+          onAdd={handleAddRecommendation}
+        />
+
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          <div className="relative flex-1 min-w-[200px]">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search tasks, tags, locations…"
+              className="pl-9 h-10"
             />
-
-            <div className="mb-4 flex flex-wrap items-center gap-2">
-              <div className="relative flex-1 min-w-[200px]">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search tasks, tags, locations…"
-                  className="pl-9 h-10"
-                />
-              </div>
-
-              <Select value={sort} onValueChange={(v) => setSort(v as SortMode)}>
-                <SelectTrigger className="w-[170px] h-10">
-                  <ArrowDownUp className="h-4 w-4 text-muted-foreground" />
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="priority">By priority</SelectItem>
-                  <SelectItem value="datetime">By date & time</SelectItem>
-                  <SelectItem value="location">By location</SelectItem>
-                </SelectContent>
-              </Select>
-
-              {selectedDate && (
-                <Button variant="ghost" size="sm" onClick={() => setSelectedDate(undefined)}>
-                  Clear date filter
-                </Button>
-              )}
-            </div>
-
-            {visible.length === 0 ? (
-              <EmptyState onCreate={handleNew} hasFilters={!!query || !!selectedDate} />
-            ) : (
-              <div className="grid gap-3 sm:grid-cols-2 animate-fade-in">
-                {visible.map((t) => (
-                  <TaskCard
-                    key={t.id}
-                    task={t}
-                    onEdit={handleEdit}
-                    onDelete={(id) => { deleteTask(id); toast.success("Task deleted"); }}
-                    onToggle={toggleComplete}
-                  />
-                ))}
-              </div>
-            )}
           </div>
 
-          {/* Sidebar */}
-          <aside className="lg:sticky lg:top-20 lg:self-start space-y-4">
-            <MiniCalendar tasks={tasks} selected={selectedDate} onSelect={setSelectedDate} />
-            <div className="rounded-lg border border-border bg-gradient-primary p-5 text-primary-foreground shadow-sm-soft">
-              <Sparkles className="h-5 w-5 mb-2" />
-              <p className="text-sm font-semibold">Smart optimization</p>
-              <p className="mt-1 text-xs text-primary-foreground/85 leading-relaxed">
-                Group tasks by location, prioritize what matters, and fill open slots automatically.
-              </p>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={handleOptimize}
-                className="mt-3 w-full bg-card text-foreground hover:bg-card/90"
-              >
-                Run now
-              </Button>
-            </div>
-          </aside>
+          <Select value={sort} onValueChange={(v) => setSort(v as SortMode)}>
+            <SelectTrigger className="h-10 w-[170px]">
+              <ArrowDownUp className="h-4 w-4 text-muted-foreground" />
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="priority">By priority</SelectItem>
+              <SelectItem value="datetime">By date & time</SelectItem>
+              <SelectItem value="location">By location</SelectItem>
+            </SelectContent>
+          </Select>
+
+          {selectedDate && (
+            <Button variant="ghost" size="sm" onClick={() => setSelectedDate(undefined)}>
+              Clear date filter
+            </Button>
+          )}
         </div>
+
+        {visible.length === 0 ? (
+          <EmptyState onCreate={handleNew} hasFilters={!!query || !!selectedDate} />
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2 animate-fade-in">
+            {visible.map((t) => (
+              <TaskCard
+                key={t.id}
+                task={t}
+                onEdit={handleEdit}
+                onDelete={(id) => { deleteTask(id); toast.success("Task deleted"); }}
+                onToggle={toggleComplete}
+              />
+            ))}
+          </div>
+        )}
       </main>
 
       <TaskDialog
@@ -300,7 +281,7 @@ const Index = () => {
         onImport={handleImport}
       />
 
-      <AIAssistant />
+      <AssistantPanel />
     </div>
   );
 };
@@ -409,7 +390,7 @@ const RecommendationPanel = ({
     <section className="mb-6 rounded-2xl border border-border bg-card/95 p-5 shadow-xs animate-fade-in">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-primary">AI recommendations</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-primary">Recommendations</p>
           <h2 className="mt-1 text-xl font-semibold tracking-tight">Suggested next moves</h2>
           <p className="mt-1 text-sm text-muted-foreground">
             Generated from your current calendar, with extra attention to missing time for family, hobbies, learning, and balance.
