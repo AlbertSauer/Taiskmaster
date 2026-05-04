@@ -1,6 +1,11 @@
-fastapi
-uvicorn[standard]
-sqlalchemy
+flask
+flask-cors
+flask-sqlalchemy
 python-dotenv
 pydantic
+pydantic[email]
 openai
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+

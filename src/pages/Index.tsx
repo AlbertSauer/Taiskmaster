@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Sparkles, Search, ArrowDownUp, CheckCircle2, Calendar as CalIcon, MapPin, Flag, UploadCloud, HeartHandshake, Dumbbell, RefreshCcw, BookOpen, Brain, GraduationCap, Smile } from "lucide-react";
 import { Header } from "@/components/Header";
 import { TaskCard } from "@/components/TaskCard";
@@ -16,6 +16,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useTasks, sortTasks, optimizeSchedule } from "@/lib/taskStore";
+import { useAuth } from "@/hooks/useAuth";
 import type { SortMode, Task } from "@/types/task";
 import { isSameDay, parseISO, isToday } from "date-fns";
 import { toast } from "sonner";
@@ -43,6 +44,7 @@ interface Recommendation {
 }
 
 const Index = () => {
+  const { user } = useAuth();
   const { tasks, addTask, updateTask, deleteTask, replaceAll, toggleComplete } = useTasks();
   const [sort, setSort] = useState<SortMode>("priority");
   const [query, setQuery] = useState("");
@@ -52,6 +54,7 @@ const Index = () => {
   const [editing, setEditing] = useState<Task | null>(null);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [loadingRecommendations, setLoadingRecommendations] = useState(false);
+  const [recommendationRefreshKey, setRecommendationRefreshKey] = useState(0);
 
   const visible = useMemo(() => {
     let list = tasks;
@@ -80,6 +83,8 @@ const Index = () => {
       done: tasks.filter((t) => t.completed).length,
     };
   }, [tasks]);
+
+  const displayName = user?.full_name?.trim() || user?.username || "Your Day";
 
   const handleSubmit = (data: Omit<Task, "id" | "createdAt"> & { id?: string }) => {
     if (data.id) {
@@ -121,11 +126,23 @@ const Index = () => {
 
     try {
       setLoadingRecommendations(true);
+      const nextRefreshKey = recommendationRefreshKey + 1;
+      setRecommendationRefreshKey(nextRefreshKey);
+      const token = localStorage.getItem("authToken");
       const response = await fetch(`${API_BASE}/api/chat/recommendations`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
           input: "Generate proactive schedule recommendations.",
+          exclude_titles: recommendations.flatMap((recommendation) => {
+            const values = [recommendation.title];
+            if (recommendation.suggested_task?.title) values.push(recommendation.suggested_task.title);
+            return values;
+          }),
+          refresh_token: `${Date.now()}-${nextRefreshKey}-${Math.random().toString(36).slice(2, 10)}`,
           tasks: tasks.map((task) => ({
             id: task.id,
             title: task.title,
@@ -155,8 +172,17 @@ const Index = () => {
   const handleAddRecommendation = async (recommendation: Recommendation) => {
     if (!recommendation.suggested_task) return;
     await addTask(recommendation.suggested_task);
+    setRecommendations((current) => current.filter((item) => item !== recommendation));
     toast.success(`Added "${recommendation.suggested_task.title}"`);
   };
+
+  useEffect(() => {
+    setRecommendations((current) => current.filter((recommendation) => {
+      const suggestedTitle = recommendation.suggested_task?.title?.toLowerCase();
+      if (!suggestedTitle) return true;
+      return !tasks.some((task) => task.title.toLowerCase() === suggestedTitle);
+    }));
+  }, [tasks]);
 
   return (
     <div className="min-h-screen bg-gradient-subtle">
@@ -171,7 +197,7 @@ const Index = () => {
               <div className="max-w-2xl animate-slide-up">
                 <p className="mb-2 text-sm font-medium text-primary">Good to see you</p>
                 <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight">
-                  Your day, organized.
+                  {displayName}
                 </h1>
                 <p className="mt-2 text-muted-foreground">
                   {stats.today > 0

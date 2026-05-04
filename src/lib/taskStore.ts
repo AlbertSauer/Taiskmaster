@@ -6,6 +6,18 @@ const API_BASE = import.meta.env.VITE_API_URL ?? "";
 const hasBackend = Boolean(API_BASE);
 const STORAGE_KEY = "taiskmaster.tasks.v1";
 
+const getAuthHeaders = () => {
+  const token = localStorage.getItem("authToken");
+  return token
+    ? {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      }
+    : {
+        "Content-Type": "application/json",
+      };
+};
+
 type PersistableTask = Task & {
   created_at?: string;
 };
@@ -112,7 +124,10 @@ const fetchTasks = async (): Promise<Task[]> => {
     return loadLocal();
   }
 
-  const res = await fetch(`${API_BASE}/api/tasks`);
+  const res = await fetch(`${API_BASE}/api/tasks`, {
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) throw new Error("Could not load tasks");
   const data = await res.json();
   return Array.isArray(data) ? data.map(normalizeTask) : [];
 };
@@ -127,9 +142,10 @@ const createTask = async (task: Omit<Task, "id" | "createdAt">): Promise<Task> =
 
   const res = await fetch(`${API_BASE}/api/tasks`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders(),
     body: JSON.stringify(task),
   });
+  if (!res.ok) throw new Error("Could not create task");
   const created = await res.json();
   return normalizeTask(created);
 };
@@ -146,9 +162,10 @@ const patchTask = async (id: string, patch: Partial<Task>): Promise<Task> => {
 
   const res = await fetch(`${API_BASE}/api/tasks/${id}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: getAuthHeaders(),
     body: JSON.stringify(patch),
   });
+  if (!res.ok) throw new Error("Could not update task");
   const updated = await res.json();
   return normalizeTask(updated);
 };
@@ -159,7 +176,11 @@ const deleteRemoteTask = async (id: string): Promise<void> => {
     return;
   }
 
-  await fetch(`${API_BASE}/api/tasks/${id}`, { method: "DELETE" });
+  const res = await fetch(`${API_BASE}/api/tasks/${id}`, {
+    method: "DELETE",
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) throw new Error("Could not delete task");
 };
 
 // Lightweight pub-sub so multiple components stay in sync.

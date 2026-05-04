@@ -1,9 +1,10 @@
-import { Sparkles, ListTodo, Moon, Sun } from "lucide-react";
+import { Sparkles, ListTodo, Moon, Sun, LogOut } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTheme } from "next-themes";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "@/hooks/useAuth";
 
 interface Props {
   onOptimize?: () => void;
@@ -15,6 +16,8 @@ interface Props {
 export const Header = ({ onOptimize, onNewTask, onRecommend, showActions = true }: Props) => {
   const { pathname } = useLocation();
   const { theme, resolvedTheme, setTheme } = useTheme();
+  const { logout, user } = useAuth();
+  const navigate = useNavigate();
   const [mounted, setMounted] = useState(false);
   const [currentTime, setCurrentTime] = useState("");
 
@@ -35,6 +38,11 @@ export const Header = ({ onOptimize, onNewTask, onRecommend, showActions = true 
     const interval = window.setInterval(syncTime, 1000);
     return () => window.clearInterval(interval);
   }, []);
+
+  const handleLogout = () => {
+    logout();
+    navigate("/login");
+  };
 
   const currentTheme = theme === "system" ? resolvedTheme : theme;
   const isDark = currentTheme === "dark";
@@ -128,6 +136,11 @@ export const Header = ({ onOptimize, onNewTask, onRecommend, showActions = true 
             <Button variant="hero" size="sm" onClick={onNewTask}>
               New task
             </Button>
+            {user && (
+              <Button variant="outline" size="sm" onClick={handleLogout} title={`Logged in as ${user.username}`}>
+                <LogOut className="h-4 w-4" />
+              </Button>
+            )}
           </div>
         )}
       </div>

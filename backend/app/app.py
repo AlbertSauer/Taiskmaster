@@ -1,21 +1,20 @@
 import os
-from flask import Flask
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
+import json
 
-from app.env import load_app_env
-
-load_app_env()
+load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv("DATABASE_URL", "sqlite:///./dev.db")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Initialize database
-from app.models import db
-db.init_app(app)
-
-# Configure CORS
+# Initialize extensions
+db = SQLAlchemy(app)
 CORS(app, resources={
     r"/api/*": {
         "origins": os.getenv("ALLOWED_ORIGINS", "http://localhost:8080").split(","),
@@ -24,34 +23,22 @@ CORS(app, resources={
     }
 })
 
-# Import models to ensure they are registered
+# Import models and routes
 from app.models import User, Task, Conversation, Message
+from app.auth import auth_bp
+from app.conversation_api import conversation_bp
 
 # Create all tables
 with app.app_context():
     db.create_all()
 
-# Import and register blueprints
-from app.auth import auth_bp
-from app.chat_api import chat_bp
-from app.conversation_api import conversation_bp
-from app.tasks_api import tasks_bp
-
+# Register blueprints
 app.register_blueprint(auth_bp, url_prefix="/api/auth")
-app.register_blueprint(chat_bp, url_prefix="/api/chat")
 app.register_blueprint(conversation_bp, url_prefix="/api/conversations")
-app.register_blueprint(tasks_bp, url_prefix="/api/tasks")
-
 
 @app.get("/")
 def root():
-    return {"message": "Welcome to Taiskmaster API. Efficient task management powered by AI."}
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
+    return {"message": "Welcome to Taiskmaster API. Visit /docs for API documentation."}
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=8000)
