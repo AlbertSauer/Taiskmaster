@@ -79,7 +79,7 @@ def register():
     db.session.commit()
 
     # Create access token
-    access_token_expires = timedelta(minutes=30)
+    access_token_expires = timedelta(days=7)
     access_token = create_access_token(
         data={"sub": new_user.username}, expires_delta=access_token_expires
     )
@@ -113,7 +113,7 @@ def login():
         return jsonify({"detail": "User account is inactive"}), 403
 
     # Create access token
-    access_token_expires = timedelta(minutes=30)
+    access_token_expires = timedelta(days=7)
     access_token = create_access_token(
         data={"sub": user.username}, expires_delta=access_token_expires
     )
@@ -133,4 +133,67 @@ def get_current_user():
         "full_name": user.full_name,
         "is_active": user.is_active,
         "created_at": user.created_at.isoformat()
+    }), 200
+
+
+@auth_bp.patch('/me')
+@token_required
+def update_current_user():
+    """Update current user profile settings."""
+    data = request.get_json() or {}
+    user = request.current_user
+
+    User, db, _, get_password_hash, create_access_token, _ = get_models()
+
+    email = data.get("email")
+    username = data.get("username")
+    full_name = data.get("full_name")
+    password = data.get("password")
+
+    if email is not None:
+        email = str(email).strip()
+        if not email:
+            return jsonify({"detail": "Email cannot be empty"}), 400
+        existing = db.session.query(User).filter((User.email == email) & (User.id != user.id)).first()
+        if existing:
+            return jsonify({"detail": "Email already in use"}), 400
+        user.email = email
+
+    if username is not None:
+        username = str(username).strip()
+        if len(username) < 3:
+            return jsonify({"detail": "Username must be at least 3 characters"}), 400
+        existing = db.session.query(User).filter((User.username == username) & (User.id != user.id)).first()
+        if existing:
+            return jsonify({"detail": "Username already in use"}), 400
+        user.username = username
+
+    if full_name is not None:
+        cleaned_name = str(full_name).strip()
+        user.full_name = cleaned_name or None
+
+    if password is not None:
+        password = str(password)
+        if len(password) < 8:
+            return jsonify({"detail": "Password must be at least 8 characters"}), 400
+        user.hashed_password = get_password_hash(password)
+
+    db.session.commit()
+
+    access_token_expires = timedelta(days=7)
+    access_token = create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+
+    return jsonify({
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "username": user.username,
+            "full_name": user.full_name,
+            "is_active": user.is_active,
+            "created_at": user.created_at.isoformat(),
+        }
     }), 200

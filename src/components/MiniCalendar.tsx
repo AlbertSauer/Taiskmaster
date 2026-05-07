@@ -54,9 +54,11 @@ export const MiniCalendar = ({ tasks, selected, onSelect }: Props) => {
               <div key={t.id} className="flex items-center gap-2 text-xs">
                 <span className={cn(
                   "h-1.5 w-1.5 shrink-0 rounded-full",
+                  t.priority === "urgent" && "bg-priority-urgent",
                   t.priority === "high" && "bg-priority-high",
                   t.priority === "medium" && "bg-priority-medium",
                   t.priority === "low" && "bg-priority-low",
+                  t.priority === "very-low" && "bg-priority-very-low",
                 )} />
                 <span className="truncate text-foreground/80">{t.title}</span>
                 {t.time && <span className="ml-auto text-muted-foreground">{t.time}</span>}

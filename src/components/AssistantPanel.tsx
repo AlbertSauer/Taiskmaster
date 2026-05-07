@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, Send, Sparkles, X, Minus, Mic, Square, Volume2, VolumeX, Languages } from "lucide-react";
+import { Bot, Send, Sparkles, X, Minus, Mic, Square, Volume2, VolumeX, Languages, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -38,7 +38,7 @@ interface AssistantTaskPayload {
   completed?: boolean;
 }
 
-interface AssistantAction {
+export interface AssistantAction {
   type: "create_task" | "create_tasks" | "update_task" | "delete_task" | "optimize_schedule";
   task?: AssistantTaskPayload;
   tasks?: AssistantTaskPayload[];
@@ -154,20 +154,202 @@ const parseRelativeDate = (text: string) => {
   return formatLocalDate(date);
 };
 
+const weekdayLookup: Record<string, number> = {
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+  sunday: 0,
+};
+
+const extractRecurringWeekdays = (text: string) => {
+  if (!/\bevery\b/i.test(text)) return [];
+  const seen = new Set<string>();
+  const weekdays: string[] = [];
+  for (const match of text.matchAll(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/gi)) {
+    const weekday = match[1].toLowerCase();
+    if (!seen.has(weekday)) {
+      seen.add(weekday);
+      weekdays.push(weekday);
+    }
+  }
+  return weekdays;
+};
+
+const parseAssistantTime = (text: string) => {
+  const match = text.match(/(\d{1,2})(?::(\d{2}))?\s?(am|pm)?/i);
+  if (!match) return undefined;
+
+  let hour = Number(match[1]);
+  const minute = Number(match[2] ?? 0);
+  const meridiem = match[3]?.toLowerCase();
+
+  if (meridiem === "pm" && hour < 12) hour += 12;
+  if (meridiem === "am" && hour === 12) hour = 0;
+  if (hour > 23 || minute > 59) return undefined;
+
+  return `${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}`;
+};
+
+const parseAssistantTimeRange = (text: string) => {
+  const match = text.match(/(\d{1,2})(?::(\d{2}))?\s?(am|pm)?\s*(?:-|to)\s*(\d{1,2})(?::(\d{2}))?\s?(am|pm)?/i);
+  if (!match) return { time: undefined, duration: undefined };
+
+  const time = parseAssistantTime(`${match[1]}:${match[2] ?? "00"} ${match[3] ?? ""}`.trim());
+  const endTime = parseAssistantTime(`${match[4]}:${match[5] ?? "00"} ${match[6] ?? ""}`.trim());
+  if (!time || !endTime) return { time: undefined, duration: undefined };
+
+  const [startHour, startMinute] = time.split(":").map(Number);
+  const [endHour, endMinute] = endTime.split(":").map(Number);
+  const duration = ((endHour * 60 + endMinute) - (startHour * 60 + startMinute) + 24 * 60) % (24 * 60);
+  return { time, duration: duration || undefined };
+};
+
+const inferPriority = (text: string): Task["priority"] => {
+  const lowered = text.toLowerCase();
+  if (/\b(urgent|asap|immediately|critical|emergency|deadline|due today|must)\b/.test(lowered)) return "urgent";
+  if (/\b(high|important|priority|doctor|dentist|appointment|exam|interview|flight|train|meeting)\b/.test(lowered)) return "high";
+  if (/\b(very low|lowest|maybe|if time|if i have time)\b/.test(lowered)) return "very-low";
+  if (/\b(low|optional|sometime|when possible|whenever|nice to have)\b/.test(lowered)) return "low";
+  return "medium";
+};
+
+const compactDescription = (title: string, text: string) => {
+  const cleaned = text
+    .replace(/^(please\s+)?(add|new task|create|schedule|plan)[:\s]+/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned || cleaned.toLowerCase() === title.toLowerCase()) return `Planned from: ${title}.`;
+  return cleaned.length > 140 ? `${cleaned.slice(0, 137).trim()}...` : cleaned;
+};
+
+const parseRecurringPeriod = (text: string) => {
+  const today = new Date();
+  if (/\bthis\s+month\b/i.test(text)) {
+    return {
+      start: today,
+      end: new Date(today.getFullYear(), today.getMonth() + 1, 0),
+    };
+  }
+
+  const match = text.match(/\bfor\s+(\d+)\s+(day|days|week|weeks|month|months)\b/i);
+  if (!match) return { start: today, end: undefined };
+
+  const amount = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  const end = new Date(today);
+  if (unit.startsWith("day")) {
+    end.setDate(today.getDate() + amount - 1);
+  } else if (unit.startsWith("week")) {
+    end.setDate(today.getDate() + amount * 7 - 1);
+  } else {
+    end.setDate(today.getDate() + amount * 30 - 1);
+  }
+  return { start: today, end };
+};
+
 const extractTaskTitle = (text: string) => {
   const cleaned = text
+    .replace(/^please\s+/i, "")
+    .replace(/^(add|new task|create|schedule|plan)[:\s]+/i, "")
+    .replace(/\bevery\s+.*$/i, "")
     .replace(/\b(today|tomorrow)\b/gi, "")
     .replace(/\bin\s+\d+\s+days?\b/gi, "")
     .replace(/\b\d+\s+days?\s+from\s+(?:now|today)\b/gi, "")
-    .replace(/(\d{1,2})(?::(\d{2}))?\s?(am|pm)?/i, "")
+    .replace(/\bthis\s+month\b/gi, "")
+    .replace(/\bfor\s+\d+\s+(day|days|week|weeks|month|months)\b/gi, "")
+    .replace(/(\d{1,2})(?::(\d{2}))?\s?(am|pm)?\s*(?:-|to)\s*(\d{1,2})(?::(\d{2}))?\s?(am|pm)?/gi, "")
+    .replace(/(\d{1,2})(?::(\d{2}))?\s?(am|pm)?/gi, "")
+    .replace(/\b(urgent|asap|immediately|critical|emergency|high|medium|low|very low|very-low|lowest|optional|maybe|if time|if i have time)\b/gi, "")
     .replace(/\bfor\b/gi, "")
     .replace(/\bthat\b/gi, "")
-    .replace(/\s+at\s+$/i, "")
+    .replace(/\bat\b/gi, "")
     .replace(/\s+/g, " ")
     .trim();
 
   if (!cleaned) return "New task";
   return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+};
+
+const parseRecurringTasks = (input: string): AssistantResult | null => {
+  const weekdays = extractRecurringWeekdays(input);
+  const daily = /\b(everyday|every day|daily|each day)\b/i.test(input);
+  if (!weekdays.length && !daily) return null;
+
+  const range = parseAssistantTimeRange(input);
+  const time = range.time ?? parseAssistantTime(input);
+  if (!time) {
+    const recurrence = daily ? "every day" : `every ${weekdays.map((day) => day[0].toUpperCase() + day.slice(1)).join(" and ")}`;
+    return {
+      reply: `I can schedule "${extractTaskTitle(input)}" ${recurrence}, but what time should I put it on your calendar?`,
+      actions: [],
+    };
+  }
+
+  const title = extractTaskTitle(input);
+  const { start, end } = parseRecurringPeriod(input);
+  const description = compactDescription(title, input);
+  const priority = inferPriority(input);
+  const tasks: AssistantTaskPayload[] = [];
+
+  if (daily) {
+    const current = new Date(start);
+    const last = end ?? new Date(start.getFullYear(), start.getMonth(), start.getDate() + 13);
+    while (current <= last && tasks.length < 60) {
+      tasks.push({
+        title,
+        description,
+        date: formatLocalDate(current),
+        time,
+        duration: range.duration,
+        priority,
+        tags: ["daily", "routine"],
+        completed: false,
+      });
+      current.setDate(current.getDate() + 1);
+    }
+  } else {
+    for (const weekday of weekdays) {
+      const current = new Date(start);
+      while (current.getDay() !== weekdayLookup[weekday]) {
+        current.setDate(current.getDate() + 1);
+      }
+
+      let occurrenceCount = 0;
+      while (occurrenceCount < 8 && (!end || current <= end)) {
+        tasks.push({
+          title,
+          description,
+          date: formatLocalDate(current),
+          time,
+          duration: range.duration,
+          priority,
+          tags: [weekday, "routine"],
+          completed: false,
+        });
+        occurrenceCount += 1;
+        current.setDate(current.getDate() + 7);
+      }
+    }
+  }
+
+  tasks.sort((a, b) => `${a.date}${a.time ?? ""}`.localeCompare(`${b.date}${b.time ?? ""}`));
+
+  if (!tasks.length) {
+    return {
+      reply: `I couldn't find any dates in that period for "${title}". Try adjusting the range or recurrence.`,
+      actions: [],
+    };
+  }
+
+  const recurrence = daily ? "every day" : `every ${weekdays.map((day) => day[0].toUpperCase() + day.slice(1)).join(" and ")}`;
+  return {
+    reply: `Scheduled "${title}" ${recurrence} from ${tasks[0].date} to ${tasks[tasks.length - 1].date}.`,
+    actions: [{ type: "create_tasks", tasks }],
+  };
 };
 
 const isConfirmationMessage = (text: string) =>
@@ -207,19 +389,38 @@ const summarizeActions = (actions: AssistantAction[], tasks: Task[]) => {
   return lines.join("\n");
 };
 
+const normalizeAssistantActions = (actions: AssistantAction[] | undefined): AssistantAction[] => {
+  if (!Array.isArray(actions)) return [];
+
+  return actions
+    .map((raw) => {
+      const normalized = { ...(raw as AssistantAction & { action?: string }) };
+      if (!normalized.type && normalized.action) {
+        normalized.type = normalized.action as AssistantAction["type"];
+      }
+      return normalized as AssistantAction;
+    })
+    .filter((action) => typeof action.type === "string");
+};
+
 const runLocalFallbackAssistant = async (
   input: string,
   ctx: ReturnType<typeof useTasks>,
 ): Promise<AssistantResult> => {
   const text = input.trim().toLowerCase();
-  const { tasks, addTask, replaceAll } = ctx;
+  const { tasks } = ctx;
 
   if (!text) return { reply: "Tell me what you'd like to do." };
 
   if (text.includes("optimize") || text.includes("reorganize")) {
-    await replaceAll(optimizeSchedule(tasks));
-    return { reply: "Nice work. I reorganized your schedule by priority and location so the day should feel smoother and easier to follow." };
+    return {
+      reply: "I will reorganize your schedule.",
+      actions: [{ type: "optimize_schedule" }]
+    };
   }
+
+  const recurringTasks = parseRecurringTasks(input);
+  if (recurringTasks) return recurringTasks;
 
   if (/^(add|new task|create|schedule|plan)\b/i.test(input.trim())) {
     const cleaned = input.replace(/^(add|new task|create|schedule|plan)[:\s]+/i, "").trim();
@@ -236,13 +437,19 @@ const runLocalFallbackAssistant = async (
     }
     const title = extractTaskTitle(cleaned);
     const date = parseRelativeDate(cleaned);
-    await addTask({
-      title,
-      date,
-      time,
-      priority: /urgent|asap|high/i.test(cleaned) ? "high" : "medium",
-    });
-    return { reply: `Done. I added "${title}" for ${date}${time ? ` at ${time}` : ""}. You’re building a solid plan.` };
+    return {
+      reply: "I will add this task.",
+      actions: [{
+        type: "create_task",
+        task: {
+          title,
+          description: compactDescription(title, cleaned),
+          date,
+          time,
+          priority: inferPriority(cleaned),
+        }
+      }]
+    };
   }
 
   if (text.includes("today")) {
@@ -256,7 +463,7 @@ const runLocalFallbackAssistant = async (
   }
 
   if (text.includes("priority") || text.includes("important")) {
-    const high = tasks.filter((t) => t.priority === "high" && !t.completed);
+    const high = tasks.filter((t) => (t.priority === "urgent" || t.priority === "high") && !t.completed);
     if (high.length === 0) return { reply: "You don’t have any high-priority items right now, which is a great place to be." };
     return { reply: "Here are your high-priority items:\n" + high.map((t) => `• ${t.title} — ${t.date}`).join("\n") };
   }
@@ -278,14 +485,18 @@ const runAssistant = async (
 
   if (!input.trim()) return { reply: "Tell me what you'd like to do." };
 
-  if (useLiveAssistant && authToken) {
+  if (useLiveAssistant) {
     try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (authToken) {
+        headers["Authorization"] = `Bearer ${authToken}`;
+      }
+
       const response = await fetch(`${API_BASE}/api/chat`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${authToken}`,
-        },
+        headers,
         body: JSON.stringify({
           input,
           tasks: tasks.map((task) => ({
@@ -362,7 +573,7 @@ const applyAssistantActions = async (
   }
 };
 
-export const AssistantPanel = () => {
+export const AssistantPanel = ({ onProposedAction }: { onProposedAction?: (action: AssistantAction) => void }) => {
   const { token, user } = useAuth();
   const [open, setOpen] = useState(false);
   const [minimized, setMinimized] = useState(false);
@@ -519,15 +730,37 @@ export const AssistantPanel = () => {
         : trimmed;
       const currentMessages = [...messages, userMsg];
       const { reply: assistantText, actions } = await runAssistant(effectiveInput, taskCtx, token, currentMessages);
+      const normalizedActions = normalizeAssistantActions(actions);
 
-      if (actions?.length) {
-        const summary = summarizeActions(actions, taskCtx.tasks);
+      if (normalizedActions.length) {
+        const act = normalizedActions.length === 1 ? normalizedActions[0] : null;
+        const isValidCreate = act?.type === "create_task" && act.task;
+        const isValidUpdate = act?.type === "update_task" && act.task_id && act.updates;
+        const isValidCreateTasks = act?.type === "create_tasks" && act.tasks?.length;
+
+        if ((isValidCreate || isValidUpdate || isValidCreateTasks) && onProposedAction) {
+          onProposedAction(act!);
+          const replyText = isValidCreateTasks 
+            ? "I've prepared the plan for you to review and save." 
+            : "I've opened the task for you to review and save.";
+          const reply: Message = {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: replyText,
+          };
+          setPendingProposal(null);
+          setMessages((m) => [...m, reply]);
+          speakAssistantReply(replyText);
+          return;
+        }
+
+        const summary = summarizeActions(normalizedActions, taskCtx.tasks);
         const reply: Message = {
           id: crypto.randomUUID(),
           role: "assistant",
           content: summary,
         };
-        setPendingProposal({ actions, summary });
+        setPendingProposal({ actions: normalizedActions, summary });
         setMessages((m) => [...m, reply]);
         speakAssistantReply("I have a plan ready. Please confirm if you want me to apply it.");
         return;
@@ -707,7 +940,7 @@ export const AssistantPanel = () => {
       <button
         onClick={() => { setOpen(true); setMinimized(false); }}
         aria-label="Open assistant"
-        className="fixed bottom-6 left-6 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-gradient-primary text-primary-foreground shadow-glow transition-all duration-300 ease-spring hover:scale-110 hover:shadow-lg-soft animate-scale-in"
+        className="fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-gradient-primary text-primary-foreground shadow-glow transition-all duration-300 ease-spring hover:scale-110 hover:shadow-lg-soft animate-scale-in"
       >
         <Sparkles className="h-6 w-6" />
       </button>
@@ -717,7 +950,7 @@ export const AssistantPanel = () => {
   return (
     <div
       className={cn(
-        "fixed bottom-6 left-6 z-50 flex w-[min(380px,calc(100vw-3rem))] flex-col rounded-2xl border border-border bg-card shadow-lg-soft animate-scale-in overflow-hidden",
+        "fixed bottom-6 right-6 z-50 flex w-[min(380px,calc(100vw-3rem))] flex-col rounded-2xl border border-border bg-card shadow-lg-soft animate-scale-in overflow-hidden",
         minimized ? "h-14" : "h-[min(560px,calc(100vh-3rem))]",
         "transition-[height] duration-300 ease-smooth",
       )}
@@ -735,6 +968,19 @@ export const AssistantPanel = () => {
           </div>
         </div>
         <div className="flex items-center gap-1">
+          <Button 
+            variant="ghost" 
+            size="icon-sm" 
+            onClick={() => {
+              setMessages([greeting]);
+              setPendingProposal(null);
+              toast.success("Chat cleared");
+            }} 
+            aria-label="Clear chat"
+            title="Clear chat"
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
           <Button variant="ghost" size="icon-sm" onClick={() => setMinimized((m) => !m)} aria-label="Minimize">
             <Minus className="h-4 w-4" />
           </Button>

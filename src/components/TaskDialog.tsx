@@ -21,11 +21,13 @@ import {
 import { formatLocalDate, formatLocalTime } from "@/lib/dateTime";
 import type { Task, Priority } from "@/types/task";
 
+type TaskDraft = Partial<Pick<Task, "id" | "createdAt">> & Omit<Task, "id" | "createdAt">;
+
 interface Props {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  initial?: Task | null;
-  onSubmit: (data: Omit<Task, "id" | "createdAt"> & { id?: string }) => void;
+  initial?: TaskDraft | null;
+  onSubmit: (data: Omit<Task, "id" | "createdAt"> & { id?: string }) => void | Promise<void>;
 }
 
 const emptyForm = () => {
@@ -45,18 +47,20 @@ const emptyForm = () => {
 
 export const TaskDialog = ({ open, onOpenChange, initial, onSubmit }: Props) => {
   const [form, setForm] = useState(emptyForm);
+  const [isSaving, setIsSaving] = useState(false);
+  const isExistingTask = Boolean(initial?.id);
 
   useEffect(() => {
     if (open) {
       if (initial) {
         setForm({
-          title: initial.title,
+          title: initial.title ?? "",
           description: initial.description ?? "",
-          date: initial.date,
+          date: initial.date || formatLocalDate(new Date()),
           time: initial.time ?? "",
           duration: initial.duration?.toString() ?? "",
           location: initial.location ?? "",
-          priority: initial.priority,
+          priority: initial.priority ?? "medium",
           tags: (initial.tags ?? []).join(", "),
         });
       } else {
@@ -65,31 +69,37 @@ export const TaskDialog = ({ open, onOpenChange, initial, onSubmit }: Props) => 
     }
   }, [open, initial]);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.title.trim()) return;
-    onSubmit({
-      id: initial?.id,
-      title: form.title.trim(),
-      description: form.description.trim() || undefined,
-      date: form.date,
-      time: form.time || undefined,
-      duration: form.duration ? Number(form.duration) : undefined,
-      location: form.location.trim() || undefined,
-      priority: form.priority,
-      tags: form.tags.split(",").map((t) => t.trim()).filter(Boolean),
-      completed: initial?.completed ?? false,
-    });
-    onOpenChange(false);
+    if (!form.title.trim() || isSaving) return;
+
+    try {
+      setIsSaving(true);
+      await onSubmit({
+        id: isExistingTask ? initial?.id : undefined,
+        title: form.title.trim(),
+        description: form.description.trim() || undefined,
+        date: form.date,
+        time: form.time || undefined,
+        duration: form.duration ? Number(form.duration) : undefined,
+        location: form.location.trim() || undefined,
+        priority: form.priority,
+        tags: form.tags.split(",").map((t) => t.trim()).filter(Boolean),
+        completed: initial?.completed ?? false,
+      });
+      onOpenChange(false);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[520px]">
         <DialogHeader>
-          <DialogTitle className="text-xl">{initial ? "Edit task" : "New task"}</DialogTitle>
+          <DialogTitle className="text-xl">{isExistingTask ? "Edit task" : "New task"}</DialogTitle>
           <DialogDescription>
-            {initial ? "Update the details below." : "Capture what needs to happen."}
+            {isExistingTask ? "Update the details below." : "Capture what needs to happen."}
           </DialogDescription>
         </DialogHeader>
 
@@ -168,9 +178,11 @@ export const TaskDialog = ({ open, onOpenChange, initial, onSubmit }: Props) => 
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="very-low">Very low</SelectItem>
                   <SelectItem value="low">Low</SelectItem>
                   <SelectItem value="medium">Medium</SelectItem>
                   <SelectItem value="high">High</SelectItem>
+                  <SelectItem value="urgent">Urgent</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -187,8 +199,12 @@ export const TaskDialog = ({ open, onOpenChange, initial, onSubmit }: Props) => 
           </div>
 
           <DialogFooter>
-            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button type="submit" variant="hero">{initial ? "Save changes" : "Create task"}</Button>
+            <Button type="button" variant="ghost" onClick={() => onOpenChange(false)} disabled={isSaving}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="hero" disabled={isSaving}>
+              {isSaving ? "Saving..." : isExistingTask ? "Save changes" : "Create task"}
+            </Button>
           </DialogFooter>
         </form>
       </DialogContent>

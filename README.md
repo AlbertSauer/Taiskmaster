@@ -1,37 +1,43 @@
 # Taiskmaster
 
-Taiskmaster is a task and schedule planner built with React, Vite, TypeScript, Tailwind CSS, and Flask.
+Taiskmaster is a React, Vite, TypeScript, Tailwind CSS, and Flask task planner with a daily dashboard, mini calendar, AI-assisted scheduling, and local/offline fallback behavior.
 
-## Current Status
+## Features
 
-The app currently includes:
-
-- Task creation, editing, completion, deletion, and filtering
+- Task creation, editing, completion, deletion, filtering, and calendar clearing
+- Dashboard loads with today's tasks selected
+- Mini calendar and dashboard automatically refresh after task changes
+- Five priority levels: `very-low`, `low`, `medium`, `high`, and `urgent`
 - Sorting by priority, date/time, and location
-- Manual task dialog with date, time, duration, priority, location, and tags
-- Mini calendar and daily planning layout
-- Google Calendar import flow
-- Rule-based schedule optimization
-- Smart recommendations with categories like family, sports, hobbies, meditation, reading, studying, and fun
-- Floating planning assistant with friendly scheduling-focused responses
-- Online mode through the Flask backend and offline fallback mode in the frontend
-- Local persistence fallback when the backend is not connected
-- JWT-based authentication routes for register, login, and current-user lookup
-- SQLite-backed conversation history with persisted user and assistant messages
-- Structured comparative-analysis responses with prompt-technique selection
+- Google Calendar `.ics` import
+- Header actions for `New task`, `Optimize`, and `Options` (profile, theme, import, done tasks, activity scores, logout)
+- Rule-based + AI-backed schedule optimization
+- Recommendations opened in a dedicated dialog, refreshable, and openable as prefilled draft tasks
+- Floating assistant that can create tasks, recurring plans, updates, deletions, and optimized schedules
+- AI-created single tasks use the backend model when configured, then open as prefilled drafts with a fitting priority and compact description
+- Life window card for ongoing/upcoming plans with relative countdown (`Starts in` / `Ends in`) and next-up preview during ongoing events
+- Activity insights with manual generation button, compact graphs, score `/100`, and per-user score history
+- Activity score retention keeps only the newest snapshot per user per day
+- JWT authentication with SQLite-backed users, tasks, conversations, and messages
+- Frontend local-storage fallback when the backend is unavailable
 
 ## Run Locally
 
-### Frontend
+Install frontend dependencies:
 
 ```bash
 npm install
+```
+
+Start the frontend:
+
+```bash
 npm run dev
 ```
 
 The frontend runs on `http://localhost:8080`.
 
-### Backend
+Start the backend:
 
 ```bash
 cd backend
@@ -45,17 +51,13 @@ The backend runs on `http://localhost:8000`.
 
 ## Environment
 
-Frontend:
-
-Create `.env.local` in the project root with:
+Create `.env.local` in the project root:
 
 ```env
 VITE_API_URL=http://localhost:8000
 ```
 
-Backend:
-
-Create `backend/.env` with values like:
+Create `backend/.env`:
 
 ```env
 DATABASE_URL=sqlite:///./dev.db
@@ -65,16 +67,9 @@ OPENAI_MODEL=gpt-4.1-mini
 SECRET_KEY=change-this-in-production
 ```
 
-If `VITE_API_URL` is not set, the frontend stays in offline mode and uses its local fallback behavior.
-
-Example files:
-
-- [.env.example](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/.env.example)
-- [backend/.env.example](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/.env.example)
+If `VITE_API_URL` is not set, the frontend uses local storage and its offline assistant fallback.
 
 ## Checks
-
-From the project root:
 
 ```bash
 npm run lint
@@ -94,60 +89,17 @@ Expected response:
 {"status":"ok"}
 ```
 
-## Conversation API
-
-The Flask backend includes a conversation-analysis API backed by SQLite. It persists data in two tables:
-
-- `conversations`: stores the conversation title, use case, owner, and timestamps
-- `messages`: stores user and assistant messages, including structured analysis output
-
-Available endpoints:
-
-- `POST /api/conversations/`: create a conversation
-- `POST /api/conversations/<conversation_id>/messages`: add a user message, generate text, and store the assistant response
-- `GET /api/conversations/`: list the current user's conversations
-- `GET /api/conversations/<conversation_id>/messages`: fetch the full retained message history for one conversation
-
-Message generation behavior:
-
-- Supports two prompt-engineering techniques: `zero-shot` and `role-based`
-- Retains the last 10 messages as conversation history for continuity
-- Returns structured comparative-analysis output including efficiency score, three approaches, a recommendation, risks, and retained context
-- Uses `OPENAI_API_KEY` when available and falls back to a deterministic structured response when it is not configured
-
-Example create-conversation request:
-
-```bash
-curl -X POST http://localhost:8000/api/conversations/ \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"title":"Weekly planning","use_case":"comparative_analysis"}'
-```
-
-Example add-message request:
-
-```bash
-curl -X POST http://localhost:8000/api/conversations/CONVERSATION_ID/messages \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"content":"Compare three ways to organize my weekly tasks.","prompt_technique":"role-based"}'
-```
-
-## Assistant Notes
-
-- The floating assistant can add tasks, optimize the schedule, answer planning questions, and use a warmer scheduling-coach tone.
-- Auth routes live at `/api/auth/register`, `/api/auth/login`, and `/api/auth/me`.
-- Conversation-analysis routes live at `/api/conversations/`.
-- Relative date phrases like `tomorrow` and `in 3 days` are supported in task-creation flows.
-
 ## Key Files
 
-- [src/components/AssistantPanel.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/AssistantPanel.tsx): floating assistant UI and frontend fallback behavior
-- [src/components/TaskCard.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/TaskCard.tsx): task card UI
-- [src/components/TaskDialog.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/TaskDialog.tsx): task create/edit dialog
-- [src/lib/taskStore.ts](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/lib/taskStore.ts): task state, persistence, sorting, and schedule optimization
-- [src/pages/Index.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/pages/Index.tsx): main planner page and recommendation panel
-- [backend/app/main.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/main.py): Flask app setup and route registration
-- [backend/app/auth.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/auth.py): auth and JWT endpoints
-- [backend/app/conversation_api.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/conversation_api.py): conversation CRUD, text generation, structured comparative analysis, and history retention
-- [backend/app/models.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/models.py): SQLite models for users, tasks, conversations, and messages
+- [src/pages/Index.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/pages/Index.tsx): dashboard, recommendations, task list, and dialogs
+- [src/components/Header.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/Header.tsx): top navigation and options menu actions
+- [src/lib/taskStore.ts](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/lib/taskStore.ts): task persistence, shared refresh state, sorting, and optimization
+- [src/components/AssistantPanel.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/AssistantPanel.tsx): floating assistant and frontend fallback parsing
+- [src/components/AppErrorBoundary.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/AppErrorBoundary.tsx): runtime crash fallback UI
+- [src/components/TaskDialog.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/TaskDialog.tsx): task create/edit form
+- [src/components/TaskCard.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/TaskCard.tsx): task display and actions
+- [src/components/MiniCalendar.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/MiniCalendar.tsx): calendar summary and selected-day task preview
+- [backend/app/chat_api.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/chat_api.py): assistant and recommendation API
+- [backend/app/tasks_api.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/tasks_api.py): task CRUD API
+- [backend/app/auth.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/auth.py): authentication API
+- [backend/app/models.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/models.py): SQLite models

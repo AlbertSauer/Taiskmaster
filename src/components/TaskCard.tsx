@@ -19,15 +19,27 @@ interface Props {
 }
 
 const priorityStyles: Record<Task["priority"], string> = {
-  high: "bg-priority-high/10 text-priority-high border-priority-high/20",
-  medium: "bg-priority-medium/10 text-priority-medium border-priority-medium/20",
+  "very-low": "bg-priority-very-low/10 text-priority-very-low border-priority-very-low/20",
   low: "bg-priority-low/10 text-priority-low border-priority-low/20",
+  medium: "bg-priority-medium/10 text-priority-medium border-priority-medium/20",
+  high: "bg-priority-high/10 text-priority-high border-priority-high/20",
+  urgent: "bg-priority-urgent/10 text-priority-urgent border-priority-urgent/20",
 };
 
 const priorityDot: Record<Task["priority"], string> = {
-  high: "bg-priority-high",
-  medium: "bg-priority-medium",
+  "very-low": "bg-priority-very-low",
   low: "bg-priority-low",
+  medium: "bg-priority-medium",
+  high: "bg-priority-high",
+  urgent: "bg-priority-urgent",
+};
+
+const priorityLabel: Record<Task["priority"], string> = {
+  "very-low": "Very low",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  urgent: "Urgent",
 };
 
 const formatDate = (iso: string) => {
@@ -128,9 +140,9 @@ export const TaskCard = ({ task, onEdit, onDelete, onToggle }: Props) => {
           </div>
 
           <div className="mt-3 flex flex-wrap items-center gap-1.5">
-            <Badge variant="outline" className={cn("gap-1.5 font-medium capitalize", priorityStyles[task.priority])}>
+            <Badge variant="outline" className={cn("gap-1.5 font-medium", priorityStyles[task.priority])}>
               <span className={cn("h-1.5 w-1.5 rounded-full", priorityDot[task.priority])} />
-              {task.priority}
+              {priorityLabel[task.priority]}
             </Badge>
             {task.tags?.map((tag) => (
               <Badge key={tag} variant="secondary" className="font-normal text-muted-foreground">

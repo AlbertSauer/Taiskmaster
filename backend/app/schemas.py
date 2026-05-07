@@ -3,6 +3,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, EmailStr
 
+PRIORITY_PATTERN = "^(very-low|low|medium|high|urgent)$"
+
 
 # Auth schemas
 class UserRegister(BaseModel):
@@ -46,7 +48,7 @@ class TaskBase(BaseModel):
     time: Optional[str] = None
     duration: Optional[int] = None
     location: Optional[str] = None
-    priority: str = Field(..., pattern="^(low|medium|high)$")
+    priority: str = Field(..., pattern=PRIORITY_PATTERN)
     tags: List[str] = Field(default_factory=list)
     completed: bool = False
 
@@ -62,7 +64,7 @@ class TaskUpdate(BaseModel):
     time: Optional[str] = None
     duration: Optional[int] = None
     location: Optional[str] = None
-    priority: Optional[str] = Field(None, pattern="^(low|medium|high)$")
+    priority: Optional[str] = Field(None, pattern=PRIORITY_PATTERN)
     tags: Optional[List[str]] = None
     completed: Optional[bool] = None
 

@@ -15,6 +15,7 @@ interface AuthContextType {
   isLoading: boolean;
   login: (username: string, password: string) => Promise<void>;
   register: (email: string, username: string, password: string, fullName?: string) => Promise<void>;
+  updateProfile: (updates: { email?: string; username?: string; full_name?: string; password?: string }) => Promise<void>;
   logout: () => void;
   isAuthenticated: boolean;
 }
@@ -131,6 +132,36 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem("authToken");
   };
 
+  const updateProfile = async (updates: { email?: string; username?: string; full_name?: string; password?: string }) => {
+    const authToken = token || localStorage.getItem("authToken");
+    if (!authToken) throw new Error("Not authenticated");
+
+    const response = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/me`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${authToken}`,
+      },
+      body: JSON.stringify(updates),
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data?.detail || "Could not update profile");
+    }
+
+    if (data.access_token) {
+      setToken(data.access_token);
+      localStorage.setItem("authToken", data.access_token);
+    }
+
+    if (data.user) {
+      setUser(data.user);
+    } else {
+      await fetchCurrentUser(data.access_token || authToken);
+    }
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -139,6 +170,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isLoading,
         login,
         register,
+        updateProfile,
         logout,
         isAuthenticated: !!token && !!user,
       }}

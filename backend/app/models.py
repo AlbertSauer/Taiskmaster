@@ -18,6 +18,7 @@ class User(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
     conversations = db.relationship('Conversation', back_populates='user', cascade='all, delete-orphan')
+    activity_scores = db.relationship('ActivityScore', back_populates='user', cascade='all, delete-orphan')
 
 
 class Task(db.Model):
@@ -63,4 +64,18 @@ class Message(db.Model):
 
     conversation = db.relationship('Conversation', back_populates='messages')
 
+
+class ActivityScore(db.Model):
+    __tablename__ = "activity_scores"
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(db.String(36), db.ForeignKey("users.id"), nullable=False, index=True)
+    health_score = db.Column(db.Integer, nullable=False)
+    status = db.Column(db.String(50), nullable=False)
+    summary = db.Column(db.Text, nullable=False)
+    guidance = db.Column(db.JSON, nullable=False, default=list)
+    graphs = db.Column(db.JSON, nullable=False, default=dict)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    user = db.relationship('User', back_populates='activity_scores')
 

@@ -3,16 +3,18 @@ import os
 import re
 from datetime import datetime, timedelta
 from random import Random
+from sqlalchemy import func
 
 from flask import Blueprint, jsonify, request
 from openai import OpenAI
 
-from app.auth import token_required
 from app.env import load_app_env
+from app.auth import token_required
 
 load_app_env()
 
 chat_bp = Blueprint("chat", __name__)
+
 
 WEEKDAY_LOOKUP = {
     "monday": 0,
@@ -38,6 +40,128 @@ MONTH_LOOKUP = {
     "november": 11,
     "december": 12,
 }
+
+PRIORITY_VALUES = ("very-low", "low", "medium", "high", "urgent")
+
+
+def _infer_priority(text):
+    lowered = text.lower()
+    if re.search(r"\b(urgent|asap|immediately|critical|emergency|deadline|due today|must)\b", lowered):
+        return "urgent"
+    if re.search(r"\b(high|important|priority|doctor|dentist|appointment|exam|interview|flight|train|meeting)\b", lowered):
+        return "high"
+    if re.search(r"\b(very low|lowest|maybe|if time|if i have time)\b", lowered):
+        return "very-low"
+    if re.search(r"\b(low|optional|sometime|when possible|whenever|nice to have)\b", lowered):
+        return "low"
+    return "medium"
+
+
+def _compact_description(title, text):
+    cleaned = re.sub(r"^(?:please\s+)?(?:add|create|new task|schedule|plan)[:\s]+", "", text.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    if not cleaned or cleaned.lower() == title.lower():
+        return f"Planned from: {title}."
+    if len(cleaned) > 140:
+        cleaned = cleaned[:137].rstrip() + "..."
+    return cleaned[0].upper() + cleaned[1:]
+
+
+def _normalize_priority(value, source_text):
+    normalized = str(value or "").strip().lower().replace(" ", "-")
+    if normalized in PRIORITY_VALUES:
+        return normalized
+    return _infer_priority(source_text)
+
+
+def _normalize_iso_date(value):
+    text = str(value or "").strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", text):
+        return text
+    if re.match(r"^\d{4}-\d{2}-\d{2}T", text):
+        return text[:10]
+    parsed = _parse_date_reference(text)
+    if parsed:
+        return parsed
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _extract_requested_weekday(text):
+    # Ignore recurring phrases here; this is for single task normalization.
+    if re.search(r"\bevery\s+", text, re.IGNORECASE):
+        return None, 0
+
+    match = re.search(r"\b(?:(next|this)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", text, re.IGNORECASE)
+    if not match:
+        return None, 0
+
+    modifier = (match.group(1) or "").lower()
+    weekday = match.group(2).lower()
+    week_offset = 1 if modifier == "next" else 0
+    return weekday, week_offset
+
+
+def _align_task_date_to_request(task, source_text):
+    weekday, week_offset = _extract_requested_weekday(source_text)
+    if not weekday:
+        return
+
+    target = datetime.strptime(_next_weekday_date(weekday, week_offset), "%Y-%m-%d").date()
+    raw_date = str(task.get("date") or "").strip()
+    if not raw_date:
+        task["date"] = target.strftime("%Y-%m-%d")
+        return
+
+    try:
+        current = datetime.strptime(raw_date, "%Y-%m-%d").date()
+    except ValueError:
+        task["date"] = target.strftime("%Y-%m-%d")
+        return
+
+    if current.weekday() != WEEKDAY_LOOKUP[weekday]:
+        task["date"] = target.strftime("%Y-%m-%d")
+
+
+def _normalize_task_payload(task, source_text):
+    if not isinstance(task, dict):
+        return task
+
+    title = str(task.get("title") or _extract_task_subject(source_text) or "New task").strip()
+    task["title"] = title
+    task["description"] = str(task.get("description") or _compact_description(title, source_text)).strip()[:140]
+    task["date"] = _normalize_iso_date(task.get("date"))
+    task["priority"] = _normalize_priority(task.get("priority"), source_text)
+    task["tags"] = task.get("tags") if isinstance(task.get("tags"), list) else []
+    task["completed"] = bool(task.get("completed", False))
+    _align_task_date_to_request(task, source_text)
+    return task
+
+
+def _normalize_actions(actions, source_text):
+    if not isinstance(actions, list):
+        return []
+
+    normalized_actions = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        if "type" not in action and isinstance(action.get("action"), str):
+            action["type"] = action["action"]
+        if action.get("type") == "create_task" and action.get("task"):
+            action["task"] = _normalize_task_payload(action["task"], source_text)
+        elif action.get("type") == "create_tasks" and isinstance(action.get("tasks"), list):
+            action["tasks"] = [_normalize_task_payload(task, source_text) for task in action["tasks"] if isinstance(task, dict)]
+        normalized_actions.append(action)
+    return normalized_actions
+
+
+def _should_use_rule_based_before_ai(rule_based):
+    actions = rule_based.get("actions") if isinstance(rule_based, dict) else None
+    if not actions:
+        return False
+
+    action_types = {action.get("type") for action in actions if isinstance(action, dict)}
+    return action_types != {"create_task"}
 
 
 def _parse_time(text):
@@ -246,12 +370,22 @@ def _parse_period_limit(text):
             end = start + timedelta(days=(amount * 30) - 1)
         return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
 
+    if re.search(r"\bthis\s+month\b", lowered):
+        today = datetime.now().date()
+        if today.month == 12:
+            first_next_month = today.replace(year=today.year + 1, month=1, day=1)
+        else:
+            first_next_month = today.replace(month=today.month + 1, day=1)
+        end = first_next_month - timedelta(days=1)
+        return today.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
     return None, None
 
 
 def _extract_task_subject(text):
     lowered = text.strip()
-    lowered = re.sub(r"^(?:please\s+)?(?:i\s+(?:want|need|would like)\s+to\s+|can you\s+|could you\s+|help me\s+)", "", lowered, flags=re.IGNORECASE)
+    lowered = re.sub(r"^please\s+", "", lowered, flags=re.IGNORECASE)
+    lowered = re.sub(r"^(?:i\s+(?:want|need|would like)\s+to\s+|can you\s+|could you\s+|help me\s+)", "", lowered, flags=re.IGNORECASE)
     lowered = re.sub(r"^(?:add|create|schedule|plan)\s+", "", lowered, flags=re.IGNORECASE)
     lowered = re.sub(r"\bevery\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b.*$", "", lowered, flags=re.IGNORECASE)
     lowered = re.sub(r"\b(everyday|every day|daily|each day)\b.*$", "", lowered, flags=re.IGNORECASE)
@@ -266,18 +400,30 @@ def _extract_task_subject(text):
     return lowered[0].upper() + lowered[1:]
 
 
-def _parse_recurring_tasks(text, existing_tasks=None):
-    existing_tasks = existing_tasks or []
-    lowered = text.lower()
-    weekday_match = re.search(
-        r"\bevery\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+def _extract_recurring_weekdays(text):
+    if not re.search(r"\bevery\b", text, re.IGNORECASE):
+        return []
+
+    seen = set()
+    weekdays = []
+    for match in re.finditer(
+        r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
         text,
         re.IGNORECASE,
-    )
+    ):
+        weekday = match.group(1).lower()
+        if weekday not in seen:
+            seen.add(weekday)
+            weekdays.append(weekday)
+    return weekdays
+
+
+def _parse_recurring_tasks(text):
+    lowered = text.lower()
+    weekdays = _extract_recurring_weekdays(text)
     daily_match = re.search(r"\b(everyday|every day|daily|each day)\b", lowered)
-    weekday_mode = weekday_match.group(1).lower() if weekday_match else None
     daily_mode = bool(daily_match)
-    if not weekday_mode and not daily_mode:
+    if not weekdays and not daily_mode:
         return None
 
     start_time, duration = _parse_time_range(text)
@@ -287,9 +433,11 @@ def _parse_recurring_tasks(text, existing_tasks=None):
     title = _extract_task_subject(text)
     if not title:
         return None
+    description = _compact_description(title, text)
+    priority = _infer_priority(text)
 
     if not start_time:
-        recurrence_label = "every day" if daily_mode else f"every {weekday_mode.capitalize()}"
+        recurrence_label = "every day" if daily_mode else "every " + " and ".join(day.capitalize() for day in weekdays)
         return {
             "reply": f'I can schedule "{title}" {recurrence_label}, but what time should I put it on your calendar?',
             "actions": [],
@@ -307,33 +455,40 @@ def _parse_recurring_tasks(text, existing_tasks=None):
             current_date = (start_dt + timedelta(days=day_offset)).strftime("%Y-%m-%d")
             tasks.append({
                 "title": title,
+                "description": description,
                 "date": current_date,
                 "time": start_time,
                 "duration": duration,
-                "priority": "medium",
+                "priority": priority,
                 "tags": ["daily", "routine"],
                 "completed": False,
             })
     else:
         occurrences = 8
-        current_date = start_dt
-        target_weekday = WEEKDAY_LOOKUP[weekday_mode]
-        while current_date.weekday() != target_weekday:
-            current_date += timedelta(days=1)
+        for weekday in weekdays:
+            current_date = start_dt
+            target_weekday = WEEKDAY_LOOKUP[weekday]
+            while current_date.weekday() != target_weekday:
+                current_date += timedelta(days=1)
 
-        while len(tasks) < occurrences:
-            if end_dt and current_date > end_dt:
-                break
-            tasks.append({
-                "title": title,
-                "date": current_date.strftime("%Y-%m-%d"),
-                "time": start_time,
-                "duration": duration,
-                "priority": "medium",
-                "tags": [weekday_mode, "routine"],
-                "completed": False,
-            })
-            current_date += timedelta(days=7)
+            weekday_tasks = 0
+            while weekday_tasks < occurrences:
+                if end_dt and current_date > end_dt:
+                    break
+                tasks.append({
+                    "title": title,
+                    "description": description,
+                    "date": current_date.strftime("%Y-%m-%d"),
+                    "time": start_time,
+                    "duration": duration,
+                    "priority": priority,
+                    "tags": [weekday, "routine"],
+                    "completed": False,
+                })
+                weekday_tasks += 1
+                current_date += timedelta(days=7)
+
+        tasks.sort(key=lambda task: (task["date"], task["time"] or ""))
 
     if not tasks:
         return {
@@ -344,7 +499,7 @@ def _parse_recurring_tasks(text, existing_tasks=None):
     return {
         "reply": (
             f'Scheduled "{title}" '
-            + ("every day" if daily_mode else f'every {weekday_mode.capitalize()}')
+            + ("every day" if daily_mode else "every " + " and ".join(day.capitalize() for day in weekdays))
             + (f" from {tasks[0]['date']} to {tasks[-1]['date']}." if len(tasks) > 1 else ".")
         ),
         "actions": [{"type": "create_tasks", "tasks": tasks}],
@@ -364,9 +519,10 @@ def _parse_new_task(text):
     title = re.sub(r"\bin\s+\d+\s+days?\b", "", title, flags=re.IGNORECASE)
     title = re.sub(r"\b\d+\s+days?\s+from\s+(?:now|today)\b", "", title, flags=re.IGNORECASE)
     title = re.sub(r"(\d{1,2})(?::(\d{2}))?\s?(am|pm)?", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\b(urgent|asap|immediately|critical|emergency|high|medium|low|very low|very-low|lowest|optional|maybe|if time|if i have time)\b", "", title, flags=re.IGNORECASE)
     title = re.sub(r"\bfor\b", "", title, flags=re.IGNORECASE)
     title = re.sub(r"\bthat\b", "", title, flags=re.IGNORECASE)
-    title = re.sub(r"\s+at\s+$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\bat\b", "", title, flags=re.IGNORECASE)
     title = re.sub(r"\s+", " ", title).strip()
 
     missing_date = not _has_explicit_date(cleaned)
@@ -383,11 +539,13 @@ def _parse_new_task(text):
         )
         return {"needs_clarification": True, "reply": reply}
 
+    task_title = (title or "New task").title()
     return {
-        "title": (title or "New task").title(),
+        "title": task_title,
+        "description": _compact_description(task_title, cleaned),
         "date": _parse_relative_date(cleaned),
         "time": time,
-        "priority": "high" if re.search(r"\b(urgent|asap|high)\b", cleaned, re.IGNORECASE) else "medium",
+        "priority": _infer_priority(cleaned),
         "tags": [],
         "completed": False,
     }
@@ -449,7 +607,9 @@ def _parse_deletion(text, tasks):
 
 
 def _extract_priority(text):
-    match = re.search(r"\b(low|medium|high)\b", text, re.IGNORECASE)
+    match = re.search(r"\b(very-low|very low|low|medium|high|urgent)\b", text, re.IGNORECASE)
+    if match and match.group(1).lower() == "very low":
+        return "very-low"
     return match.group(1).lower() if match else None
 
 
@@ -492,13 +652,13 @@ def _parse_task_update(text, tasks):
             }
 
     priority_match = re.match(
-        r"^(?:make|set|change)\s+(.+?)\s+(?:to\s+)?(low|medium|high)\s+priority$",
+        r"^(?:make|set|change)\s+(.+?)\s+(?:to\s+)?(very-low|very low|low|medium|high|urgent)\s+priority$",
         stripped,
         re.IGNORECASE,
     )
     if priority_match:
         target = _find_task_match(priority_match.group(1), tasks)
-        priority = priority_match.group(2).lower()
+        priority = priority_match.group(2).lower().replace(" ", "-")
         if target:
             return {
                 "reply": f'Set "{target.get("title")}" to {priority} priority.',
@@ -506,13 +666,13 @@ def _parse_task_update(text, tasks):
             }
 
     generic_priority_match = re.match(
-        r"^(?:make|set|change)\s+(.+?)\s+(?:to\s+)?(?:priority\s+)?(low|medium|high)$",
+        r"^(?:make|set|change)\s+(.+?)\s+(?:to\s+)?(?:priority\s+)?(very-low|very low|low|medium|high|urgent)$",
         stripped,
         re.IGNORECASE,
     )
     if generic_priority_match:
         target = _find_task_match(generic_priority_match.group(1), tasks)
-        priority = generic_priority_match.group(2).lower()
+        priority = generic_priority_match.group(2).lower().replace(" ", "-")
         if target:
             return {
                 "reply": f'Set "{target.get("title")}" to {priority} priority.',
@@ -550,7 +710,7 @@ def _rule_based_response(payload):
             "actions": [{"type": "optimize_schedule"}],
         }
 
-    recurring_tasks = _parse_recurring_tasks(text, tasks)
+    recurring_tasks = _parse_recurring_tasks(text)
     if recurring_tasks:
         return recurring_tasks
 
@@ -598,7 +758,7 @@ def _rule_based_response(payload):
         }
 
     if "priority" in lowered or "important" in lowered:
-        high_priority = [task for task in tasks if task.get("priority") == "high" and not task.get("completed")]
+        high_priority = [task for task in tasks if task.get("priority") in ("urgent", "high") and not task.get("completed")]
         if not high_priority:
             return {"reply": "You don't have any high-priority items right now, which is a great place to be.", "actions": []}
 
@@ -620,24 +780,6 @@ def _rule_based_response(payload):
             ),
             "actions": [],
         }
-
-    return None
-
-
-def _safe_rule_based_response(payload):
-    raw_text = (payload.get("input") or "").strip()
-    text = raw_text.lower()
-    tasks = payload.get("tasks", []) or []
-
-    if not text:
-        return {"reply": "Tell me what you'd like to do, and I'll help turn it into a clear plan.", "actions": []}
-
-    recurring_tasks = _parse_recurring_tasks(raw_text, tasks)
-    if recurring_tasks:
-        return recurring_tasks
-
-    if "today" in text or "priority" in text or "important" in text or "help" in text or "?" in text:
-        return _rule_based_response(payload)
 
     return None
 
@@ -677,11 +819,12 @@ def _has_any(tasks, keywords):
     return any(keyword in combined for keyword in keywords)
 
 
-def _make_task(title, days_from_now, category, priority="medium", tags=None, tasks=None, duration=60, preferred_time=None):
-    date = (datetime.now() + timedelta(days=days_from_now)).strftime("%Y-%m-%d")
+def _make_task(title, days_from_now, category, priority="medium", tags=None, tasks=None, duration=60, preferred_time=None, date_override=None):
+    date = date_override or (datetime.now() + timedelta(days=days_from_now)).strftime("%Y-%m-%d")
     scheduled_time = _suggest_time_for_date(tasks or [], date, duration=duration, preferred_time=preferred_time)
     return {
         "title": title,
+        "description": _compact_description(title, title),
         "date": date,
         "time": scheduled_time,
         "duration": duration,
@@ -709,24 +852,228 @@ def _fit_recommendation_times(recommendations, tasks):
     return recommendations
 
 
+def _normalize_recommendation_item(item, fallback_days=1, tasks=None):
+    if not isinstance(item, dict):
+        return None
+
+    tasks = tasks or []
+    recommendation = dict(item)
+    suggested = recommendation.get("suggested_task")
+    if suggested is None:
+        recommendation["suggested_task"] = None
+        return recommendation
+
+    if not isinstance(suggested, dict):
+        recommendation["suggested_task"] = None
+        return recommendation
+
+    fallback = _make_task(
+        suggested.get("title") or recommendation.get("title") or "Suggested task",
+        fallback_days,
+        recommendation.get("category") or "schedule",
+        tasks=tasks,
+    )
+    merged = {**fallback, **suggested}
+    merged = _normalize_task_payload(merged, " ".join(
+        str(value) for value in [
+            recommendation.get("title", ""),
+            recommendation.get("reason", ""),
+            suggested.get("title", ""),
+            suggested.get("description", ""),
+            suggested.get("location", ""),
+        ] if value
+    ))
+    recommendation["suggested_task"] = merged
+    return recommendation
+
+
+def _pin_recommendations_to_date(recommendations, target_date):
+    pinned = []
+    for recommendation in recommendations:
+        if not recommendation:
+            continue
+        suggested = recommendation.get("suggested_task")
+        if isinstance(suggested, dict):
+            suggested["date"] = target_date
+        pinned.append(recommendation)
+    return pinned
+
+
+def _normalize_optimized_task(candidate, original):
+    source_text = " ".join(
+        part for part in [
+            str(candidate.get("title") or original.get("title") or "").strip(),
+            str(candidate.get("description") or original.get("description") or "").strip(),
+            str(candidate.get("location") or original.get("location") or "").strip(),
+        ] if part
+    )
+
+    merged = {
+        "id": original.get("id"),
+        "title": str(candidate.get("title") or original.get("title") or "Task").strip(),
+        "description": str(candidate.get("description") or original.get("description") or "").strip() or _compact_description(
+            str(candidate.get("title") or original.get("title") or "Task"),
+            source_text or str(original.get("title") or "Task"),
+        ),
+        "date": str(candidate.get("date") or original.get("date") or datetime.now().strftime("%Y-%m-%d")).strip(),
+        "time": candidate.get("time") if candidate.get("time") not in ("", None) else original.get("time"),
+        "duration": candidate.get("duration") if candidate.get("duration") is not None else original.get("duration"),
+        "location": str(candidate.get("location") or original.get("location") or "").strip() or None,
+        "priority": _normalize_priority(candidate.get("priority"), source_text),
+        "tags": candidate.get("tags") if isinstance(candidate.get("tags"), list) else (original.get("tags") if isinstance(original.get("tags"), list) else []),
+        "completed": bool(candidate.get("completed", original.get("completed", False))),
+    }
+    _align_task_date_to_request(merged, source_text)
+    return merged
+
+
+def _enhance_tasks_fallback(tasks):
+    enhanced = []
+    for task in tasks:
+        merged = _normalize_optimized_task(task, task)
+        if merged.get("time"):
+            try:
+                scheduled = datetime.strptime(f"{merged['date']} {merged['time']}", "%Y-%m-%d %H:%M")
+                now = datetime.now()
+                if not merged.get("completed"):
+                    if scheduled.date() == now.date() and scheduled <= now + timedelta(hours=2):
+                        merged["priority"] = "urgent"
+                    elif scheduled.date() <= now.date() + timedelta(days=1) and merged["priority"] in ("very-low", "low"):
+                        merged["priority"] = "medium"
+            except ValueError:
+                pass
+        enhanced.append(merged)
+    return enhanced
+
+
+def _to_minutes(duration):
+    try:
+        value = int(duration or 60)
+        if value <= 0:
+            return 60
+        return min(value, 12 * 60)
+    except Exception:
+        return 60
+
+
+def _category_for_task(task):
+    text = " ".join([
+        str(task.get("title") or ""),
+        str(task.get("description") or ""),
+        " ".join(task.get("tags") or []),
+    ]).lower()
+    if re.search(r"\b(workout|gym|run|sports|exercise|walk|training)\b", text):
+        return "movement"
+    if re.search(r"\b(break|rest|mindful|meditation|recovery|pause)\b", text):
+        return "recovery"
+    if re.search(r"\b(family|friends|social|partner|kids)\b", text):
+        return "social"
+    if re.search(r"\b(read|study|course|learning|practice)\b", text):
+        return "learning"
+    if re.search(r"\b(meeting|work|project|task|office|client)\b", text):
+        return "work"
+    return "personal"
+
+
+def _activity_insights_fallback(tasks):
+    totals = {
+        "work": 0,
+        "movement": 0,
+        "recovery": 0,
+        "social": 0,
+        "learning": 0,
+        "personal": 0,
+    }
+    per_day = {}
+    for task in tasks:
+        date = str(task.get("date") or datetime.now().strftime("%Y-%m-%d"))
+        minutes = _to_minutes(task.get("duration"))
+        category = _category_for_task(task)
+        totals[category] += minutes
+        per_day[date] = per_day.get(date, 0) + minutes
+
+    total_minutes = sum(totals.values()) or 1
+    busy_days = sum(1 for value in per_day.values() if value >= 8 * 60)
+    avg_per_day = (sum(per_day.values()) / len(per_day)) if per_day else 0
+    recovery_ratio = totals["recovery"] / total_minutes
+    movement_ratio = totals["movement"] / total_minutes
+
+    score = 70
+    if recovery_ratio >= 0.12:
+        score += 12
+    elif recovery_ratio < 0.06:
+        score -= 10
+    if movement_ratio >= 0.10:
+        score += 10
+    elif movement_ratio < 0.05:
+        score -= 8
+    if avg_per_day > 9 * 60:
+        score -= 10
+    if busy_days >= 4:
+        score -= 6
+    score = max(20, min(95, score))
+
+    status = "healthy" if score >= 75 else ("watch" if score >= 55 else "needs_changes")
+    guidance = []
+    if recovery_ratio < 0.08:
+        guidance.append("Add one short recovery break (15-30 min) on heavier days.")
+    if movement_ratio < 0.08:
+        guidance.append("Add a movement block 2-3 times this week.")
+    if avg_per_day > 8.5 * 60:
+        guidance.append("Workload is dense. Splitting one long block could improve focus.")
+    if not guidance:
+        guidance.append("Your calendar balance looks strong. Keep your current rhythm.")
+
+    graph = []
+    for key, label, color in [
+        ("work", "Work", "var(--chart-1)"),
+        ("movement", "Movement", "var(--chart-2)"),
+        ("recovery", "Breaks", "var(--chart-3)"),
+        ("social", "Social", "var(--chart-4)"),
+        ("learning", "Learning", "var(--chart-5)"),
+        ("personal", "Personal", "var(--primary)"),
+    ]:
+        minutes = totals[key]
+        graph.append({
+            "label": label,
+            "minutes": minutes,
+            "percent": round((minutes / total_minutes) * 100, 1),
+            "color": color,
+        })
+
+    return {
+        "status": status,
+        "health_score": score,
+        "summary": "AI checked your calendar balance and workload pattern.",
+        "guidance": guidance[:3],
+        "graphs": {
+            "activity_mix": graph,
+            "load": {
+                "avg_minutes_per_day": round(avg_per_day),
+                "busy_days": busy_days,
+                "scheduled_days": len(per_day),
+            },
+        },
+    }
+
+
 @chat_bp.route("", methods=["POST"])
 @chat_bp.route("/", methods=["POST"])
-@token_required
 def chat():
     payload = request.get_json(silent=True) or {}
+    user_input = payload.get("input", "")
     api_key = os.getenv("OPENAI_API_KEY")
+    rule_based = _rule_based_response(payload)
+    if rule_based and rule_based.get("actions") and _should_use_rule_based_before_ai(rule_based):
+        return jsonify(rule_based), 200
+
     if not api_key:
-        rule_based = _rule_based_response(payload)
         if rule_based:
             return jsonify(rule_based), 200
         return jsonify({
             "reply": "I'm having trouble reaching the live AI right now, but I can still help with planning, adding tasks, and basic schedule questions.",
             "actions": [],
         }), 200
-
-    rule_based = _safe_rule_based_response(payload)
-    if rule_based:
-        return jsonify(rule_based), 200
 
     tasks = payload.get("tasks", []) or []
     messages = payload.get("messages", []) or []
@@ -745,20 +1092,23 @@ def chat():
         "For add or change requests, interpret the user's actual sentence carefully and extract the best fitting task title, date, time, duration, and location from it. "
         "Do not use generic names if the user already implied a specific task name. "
         "Rewrite task titles so they are short, clean, well-capitalized, grammatically correct, and specific to the activity. "
+        "For every created task, generate a compact one-sentence description from the user's provided information. Keep it under 140 characters and do not invent sensitive details. "
+        "Choose the best fitting priority from exactly these values: very-low, low, medium, high, urgent. Use urgent only for truly time-sensitive or critical items. "
         "Correct obvious spelling and grammar issues in any created or renamed task title. "
         "If the input mentions a place, preserve it in the location field. "
         "If the input implies a timed range like 16-17, set time to the start and duration to the difference in minutes. "
         "If the user asks to move or rename a task, return an update_task action instead of a create action. "
+        "If the user wants to add or change a task but hasn't specified enough information (such as the exact time, date, or location), ask them for it explicitly before creating or updating the task. "
         "Return valid JSON with keys reply and actions. "
         "actions must be an array. "
         "Allowed action types are create_task, create_tasks, update_task, delete_task, and optimize_schedule. "
         "Only produce a create_task action when the user clearly asks to add or create a task. "
+        "For a create_task action, you MUST include a 'task' object inside the action containing the fields: title, description, date, time, duration, location, priority, tags, and completed. "
         "Use create_tasks when the user asks for a recurring plan like every Monday, every week, or similar repeated scheduling. "
-        "For create_tasks, include a tasks array of concrete task objects with title, description, date, time, duration, location, priority, tags, and completed. "
+        "For create_tasks, include a 'tasks' array of concrete task objects. "
         "Produce an update_task action when the user asks to reschedule, rename, reprioritize, complete, or otherwise modify an existing task. "
+        "For an update_task action, you MUST include 'task_id' (the exact existing ID) and an 'updates' object containing the modified fields. "
         "Produce a delete_task action when the user clearly asks to remove, delete, or cancel an existing task. "
-        "When returning update_task, include the exact existing task_id from the provided task list. "
-        "Valid update fields include title, description, date, time, duration, location, priority, tags, and completed. "
         "When returning delete_task, include the exact existing task_id from the provided task list. "
         "If you are unsure about an action, ask one concise clarification question and return no actions. "
         "If the user input is unclear or does not map cleanly to a calendar action, ask a concise follow-up question instead of guessing. "
@@ -768,7 +1118,7 @@ def chat():
         f"Current date: {datetime.now().strftime('%Y-%m-%d')}.\n"
         f"Conversation history:\n{history_context or '- No previous messages'}\n\n"
         f"Current tasks:\n{task_context if task_context else '- No tasks yet'}\n\n"
-        f'User: {payload.get("input", "")}'
+            f'User: {user_input}'
     )
 
     try:
@@ -782,13 +1132,17 @@ def chat():
             max_tokens=450,
             temperature=0.7,
         )
+        
         content = completion.choices[0].message.content or "{}"
         parsed = json.loads(content)
+        actions = _normalize_actions(parsed.get("actions", []), user_input)
         return jsonify({
             "reply": parsed.get("reply", "I couldn't form a reply right now."),
-            "actions": parsed.get("actions", []),
+            "actions": actions,
         }), 200
-    except Exception:
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({
             "reply": "I'm having trouble reaching the live AI right now, but I can still help with planning, adding tasks, and basic schedule questions.",
             "actions": [],
@@ -796,61 +1150,64 @@ def chat():
 
 
 @chat_bp.post("/recommendations")
-@token_required
 def recommendations():
     payload = request.get_json(silent=True) or {}
     tasks = payload.get("tasks", []) or []
+    target_date = payload.get("target_date")
     excluded_titles = {title.lower() for title in payload.get("exclude_titles", []) or []}
     refresh_token = str(payload.get("refresh_token", ""))
+
+    if not isinstance(target_date, str) or not re.match(r"^\d{4}-\d{2}-\d{2}$", target_date):
+        target_date = datetime.now().strftime("%Y-%m-%d")
 
     base_pool = [
         {
             "title": "Plan family time",
             "reason": "Your schedule does not show much intentional family time right now.",
             "category": "family",
-            "suggested_task": _make_task("Family time", 2, "family", tasks=tasks, duration=90, preferred_time="18:30"),
+            "suggested_task": _make_task("Family time", 2, "family", tasks=tasks, duration=90, preferred_time="18:30", date_override=target_date),
         },
         {
             "title": "Add a movement block",
             "reason": "A short workout or walk can improve energy and make the rest of the schedule feel easier.",
             "category": "sports",
-            "suggested_task": _make_task("Workout session", 1, "sports", tags=["health", "sports"], tasks=tasks, duration=60, preferred_time="17:30"),
+            "suggested_task": _make_task("Workout session", 1, "sports", tags=["health", "sports"], tasks=tasks, duration=60, preferred_time="17:30", date_override=target_date),
         },
         {
             "title": "Reserve reading time",
             "reason": "A small reading habit can create a calmer buffer around busy work blocks.",
             "category": "reading",
-            "suggested_task": _make_task("Reading time", 3, "reading", tasks=tasks, duration=45, preferred_time="20:00"),
+            "suggested_task": _make_task("Reading time", 3, "reading", tasks=tasks, duration=45, preferred_time="20:00", date_override=target_date),
         },
         {
             "title": "Add a recovery break",
             "reason": "Your week may benefit from a short recovery or mindfulness block.",
             "category": "recovery",
-            "suggested_task": _make_task("Mindfulness break", 1, "recovery", tags=["recovery", "health"], tasks=tasks, duration=30, preferred_time="12:30"),
+            "suggested_task": _make_task("Mindfulness break", 1, "recovery", tags=["recovery", "health"], tasks=tasks, duration=30, preferred_time="12:30", date_override=target_date),
         },
         {
             "title": "Plan a study session",
             "reason": "A focused learning block is missing from the current week.",
             "category": "studying",
-            "suggested_task": _make_task("Study session", 2, "studying", tags=["studying", "learning"], tasks=tasks, duration=60, preferred_time="18:00"),
+            "suggested_task": _make_task("Study session", 2, "studying", tags=["studying", "learning"], tasks=tasks, duration=60, preferred_time="18:00", date_override=target_date),
         },
         {
             "title": "Make time for a hobby",
             "reason": "There is room for a lower-pressure personal activity that keeps the week enjoyable.",
             "category": "hobbies",
-            "suggested_task": _make_task("Hobby time", 4, "hobbies", tasks=tasks, duration=60, preferred_time="19:00"),
+            "suggested_task": _make_task("Hobby time", 4, "hobbies", tasks=tasks, duration=60, preferred_time="19:00", date_override=target_date),
         },
         {
             "title": "Add a planning review",
             "reason": "A short planning check-in can keep your next few days from feeling fragmented.",
             "category": "schedule",
-            "suggested_task": _make_task("Planning review", 1, "schedule", priority="high", tasks=tasks, duration=30, preferred_time="08:30"),
+            "suggested_task": _make_task("Planning review", 1, "schedule", priority="high", tasks=tasks, duration=30, preferred_time="08:30", date_override=target_date),
         },
         {
             "title": "Protect a fun block",
             "reason": "A dedicated fun activity can make the schedule feel more sustainable.",
             "category": "fun",
-            "suggested_task": _make_task("Fun activity", 5, "fun", tasks=tasks, duration=90, preferred_time="19:30"),
+            "suggested_task": _make_task("Fun activity", 5, "fun", tasks=tasks, duration=90, preferred_time="19:30", date_override=target_date),
         },
     ]
 
@@ -879,7 +1236,7 @@ def recommendations():
             "title": "Protect a planning block",
             "reason": "Your schedule is well-covered already, so a short review block can help keep it that way.",
             "category": "schedule",
-            "suggested_task": _make_task("Weekly planning review", 1, "schedule", priority="high", tasks=tasks, duration=30, preferred_time="08:30"),
+            "suggested_task": _make_task("Weekly planning review", 1, "schedule", priority="high", tasks=tasks, duration=30, preferred_time="08:30", date_override=target_date),
         }]
 
     api_key = os.getenv("OPENAI_API_KEY")
@@ -891,10 +1248,13 @@ def recommendations():
                 f"Current tasks:\n{_build_task_context(tasks) or '- No tasks yet'}\n"
                 f"Excluded recommendation titles: {', '.join(sorted(excluded_titles)) or 'None'}.\n"
                 f"Refresh token: {refresh_token or 'none'}.\n"
+                f"Target date for recommendations: {target_date}.\n"
                 "Return JSON with a recommendations array of 4 fresh ideas. "
                 "Each item must include title, reason, category, and suggested_task. "
+                "Every suggested_task must include a compact description and one priority value from very-low, low, medium, high, urgent. "
+                "All suggested_task dates must be exactly the target date. "
                 "Avoid repeating excluded titles or near-duplicates. "
-                "Choose suggested_task times that fit around the current task list when possible. "
+                "Choose suggested_task times that fit around the current task list when possible and avoid overlapping existing tasks or other recommendations. "
                 "Valid categories: schedule, family, sports, health, recovery, personal, hobbies, meditation, reading, studying, fun."
             )
             completion = client.chat.completions.create(
@@ -911,13 +1271,198 @@ def recommendations():
             parsed = json.loads(content)
             model_recommendations = parsed.get("recommendations", [])
             if isinstance(model_recommendations, list) and model_recommendations:
+                normalized_model_recommendations = [
+                    _normalize_recommendation_item(recommendation, fallback_days=(idx % 4) + 1, tasks=tasks)
+                    for idx, recommendation in enumerate(model_recommendations)
+                ]
                 recommendations = [
-                    recommendation for recommendation in model_recommendations
+                    recommendation for recommendation in normalized_model_recommendations if recommendation
                     if recommendation.get("title", "").lower() not in excluded_titles
                     and (recommendation.get("suggested_task", {}) or {}).get("title", "").lower() not in excluded_titles
                 ][:4] or recommendations
         except Exception:
             pass
 
+    recommendations = [
+        _normalize_recommendation_item(recommendation, fallback_days=(idx % 4) + 1, tasks=tasks)
+        for idx, recommendation in enumerate(recommendations[:4])
+    ]
+    recommendations = [recommendation for recommendation in recommendations if recommendation]
+    recommendations = _pin_recommendations_to_date(recommendations, target_date)
     recommendations = _fit_recommendation_times(recommendations[:4], tasks)
     return jsonify({"recommendations": recommendations}), 200
+
+
+@chat_bp.post("/optimize-schedule")
+def optimize_schedule_ai():
+    payload = request.get_json(silent=True) or {}
+    tasks = payload.get("tasks", []) or []
+    if not isinstance(tasks, list):
+        return jsonify({"detail": "tasks must be an array"}), 400
+
+    if len(tasks) == 0:
+        return jsonify({"tasks": []}), 200
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return jsonify({"tasks": _enhance_tasks_fallback(tasks)}), 200
+
+    try:
+        client = OpenAI(api_key=api_key)
+        prompt = (
+            f"Current date: {datetime.now().strftime('%Y-%m-%d')}.\n"
+            "Improve this task list for a scheduling app. Preserve each task id and calendar intent.\n"
+            "Return JSON only: {\"tasks\": [...]}\n"
+            "For every task include: id, title, description, date, time, duration, location, priority, tags, completed.\n"
+            "Rules:\n"
+            "- Keep ids exactly unchanged.\n"
+            "- Keep the number of tasks unchanged.\n"
+            "- Keep date/time unless clearly invalid.\n"
+            "- Rewrite title/description to be concise and useful.\n"
+            "- Choose priority from: very-low, low, medium, high, urgent.\n"
+            "- Keep tags relevant and compact.\n\n"
+            f"Input tasks JSON:\n{json.dumps(tasks, ensure_ascii=True)}"
+        )
+
+        completion = client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are a precise scheduling optimizer that returns strict JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1400,
+            temperature=0.5,
+        )
+
+        content = completion.choices[0].message.content or "{}"
+        parsed = json.loads(content)
+        candidate_tasks = parsed.get("tasks", [])
+        if not isinstance(candidate_tasks, list):
+            return jsonify({"tasks": _enhance_tasks_fallback(tasks)}), 200
+
+        source_by_id = {str(task.get("id")): task for task in tasks if task.get("id")}
+        merged = []
+        for idx, original in enumerate(tasks):
+            candidate = candidate_tasks[idx] if idx < len(candidate_tasks) and isinstance(candidate_tasks[idx], dict) else {}
+            candidate_id = str(candidate.get("id") or original.get("id") or "")
+            if candidate_id and candidate_id in source_by_id:
+                original = source_by_id[candidate_id]
+            merged.append(_normalize_optimized_task(candidate, original))
+
+        return jsonify({"tasks": merged}), 200
+    except Exception:
+        return jsonify({"tasks": _enhance_tasks_fallback(tasks)}), 200
+
+
+@chat_bp.post("/activity-insights")
+@token_required
+def activity_insights():
+    payload = request.get_json(silent=True) or {}
+    tasks = payload.get("tasks", []) or []
+    if not isinstance(tasks, list):
+        return jsonify({"detail": "tasks must be an array"}), 400
+
+    insights = _activity_insights_fallback(tasks)
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        return jsonify(insights), 200
+
+    try:
+        client = OpenAI(api_key=api_key)
+        prompt = (
+            "You receive calendar tasks and precomputed metrics.\n"
+            "Return JSON only with keys: summary (string), guidance (array of max 3 short strings), status (healthy|watch|needs_changes), health_score (0-100).\n"
+            f"Current date: {datetime.now().strftime('%Y-%m-%d')}.\n"
+            f"Tasks:\n{_build_task_context(tasks) or '- No tasks'}\n"
+            f"Precomputed metrics:\n{json.dumps(insights['graphs'], ensure_ascii=True)}\n"
+            f"Current fallback score/status: {insights['health_score']} / {insights['status']}."
+        )
+        completion = client.chat.completions.create(
+            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "You are a concise wellbeing and productivity analyst for calendar data."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=350,
+            temperature=0.4,
+        )
+        content = completion.choices[0].message.content or "{}"
+        parsed = json.loads(content)
+        summary = str(parsed.get("summary") or "").strip()
+        guidance = parsed.get("guidance") if isinstance(parsed.get("guidance"), list) else []
+        status = str(parsed.get("status") or insights["status"]).strip().lower()
+        score = int(parsed.get("health_score")) if str(parsed.get("health_score", "")).isdigit() else insights["health_score"]
+
+        insights["summary"] = summary or insights["summary"]
+        insights["guidance"] = [str(item).strip() for item in guidance if str(item).strip()][:3] or insights["guidance"]
+        insights["status"] = status if status in {"healthy", "watch", "needs_changes"} else insights["status"]
+        insights["health_score"] = max(0, min(100, score))
+    except Exception:
+        pass
+
+    try:
+        from app.models import ActivityScore, db
+        score_entry = ActivityScore(
+            user_id=request.current_user.id,
+            health_score=int(insights.get("health_score") or 0),
+            status=str(insights.get("status") or "watch"),
+            summary=str(insights.get("summary") or ""),
+            guidance=insights.get("guidance") if isinstance(insights.get("guidance"), list) else [],
+            graphs=insights.get("graphs") if isinstance(insights.get("graphs"), dict) else {},
+        )
+        db.session.add(score_entry)
+        db.session.commit()
+
+        # Keep only the newest score per user for the current day.
+        newest_today = (
+            db.session.query(ActivityScore)
+            .filter(
+                ActivityScore.user_id == request.current_user.id,
+                func.date(ActivityScore.created_at) == func.date(score_entry.created_at),
+            )
+            .order_by(ActivityScore.created_at.desc())
+            .first()
+        )
+        if newest_today:
+            (
+                db.session.query(ActivityScore)
+                .filter(
+                    ActivityScore.user_id == request.current_user.id,
+                    func.date(ActivityScore.created_at) == func.date(newest_today.created_at),
+                    ActivityScore.id != newest_today.id,
+                )
+                .delete(synchronize_session=False)
+            )
+            db.session.commit()
+    except Exception:
+        pass
+
+    return jsonify(insights), 200
+
+
+@chat_bp.get("/activity-scores")
+@token_required
+def activity_scores():
+    from app.models import ActivityScore, db
+    scores = (
+        db.session.query(ActivityScore)
+        .filter(ActivityScore.user_id == request.current_user.id)
+        .order_by(ActivityScore.created_at.desc())
+        .all()
+    )
+    return jsonify({
+        "scores": [
+            {
+                "id": score.id,
+                "health_score": score.health_score,
+                "status": score.status,
+                "summary": score.summary,
+                "guidance": score.guidance or [],
+                "graphs": score.graphs or {},
+                "created_at": score.created_at.isoformat(),
+            }
+            for score in scores
+        ]
+    }), 200

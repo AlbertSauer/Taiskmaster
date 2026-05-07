@@ -4,6 +4,7 @@ import type { Task, SortMode } from "@/types/task";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
 const hasBackend = Boolean(API_BASE);
+const isAuthenticated = () => hasBackend && !!localStorage.getItem("authToken");
 const STORAGE_KEY = "taiskmaster.tasks.v1";
 
 const getAuthHeaders = () => {
@@ -120,7 +121,7 @@ const saveLocal = (tasks: Task[]) => {
 };
 
 const fetchTasks = async (): Promise<Task[]> => {
-  if (!hasBackend) {
+  if (!isAuthenticated()) {
     return loadLocal();
   }
 
@@ -133,7 +134,7 @@ const fetchTasks = async (): Promise<Task[]> => {
 };
 
 const createTask = async (task: Omit<Task, "id" | "createdAt">): Promise<Task> => {
-  if (!hasBackend) {
+  if (!isAuthenticated()) {
     const next: Task = { ...task, id: crypto.randomUUID(), createdAt: new Date().toISOString() };
     const all = [...loadLocal(), next];
     saveLocal(all);
@@ -151,7 +152,7 @@ const createTask = async (task: Omit<Task, "id" | "createdAt">): Promise<Task> =
 };
 
 const patchTask = async (id: string, patch: Partial<Task>): Promise<Task> => {
-  if (!hasBackend) {
+  if (!isAuthenticated()) {
     const existing = loadLocal();
     const updated = existing.map((t) => (t.id === id ? { ...t, ...patch } : t));
     saveLocal(updated);
@@ -171,7 +172,7 @@ const patchTask = async (id: string, patch: Partial<Task>): Promise<Task> => {
 };
 
 const deleteRemoteTask = async (id: string): Promise<void> => {
-  if (!hasBackend) {
+  if (!isAuthenticated()) {
     saveLocal(loadLocal().filter((task) => task.id !== id));
     return;
   }
@@ -183,9 +184,29 @@ const deleteRemoteTask = async (id: string): Promise<void> => {
   if (!res.ok) throw new Error("Could not delete task");
 };
 
-// Lightweight pub-sub so multiple components stay in sync.
-const listeners = new Set<() => void>();
-const notify = () => listeners.forEach((l) => l());
+const deleteAllRemoteTasks = async (tasks: Task[]): Promise<void> => {
+  if (!isAuthenticated()) {
+    saveLocal([]);
+    return;
+  }
+
+  await Promise.all(tasks.map((task) => deleteRemoteTask(task.id)));
+};
+
+// Shared task snapshot so the dashboard, calendar, and assistant stay in sync.
+let taskSnapshot: Task[] | null = null;
+const listeners = new Set<(tasks: Task[]) => void>();
+
+const publishTasks = (next: Task[]) => {
+  taskSnapshot = next;
+  listeners.forEach((listener) => listener(next));
+};
+
+const refreshTasks = async () => {
+  const next = await fetchTasks();
+  publishTasks(next);
+  return next;
+};
 
 export const useTasks = () => {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -193,48 +214,65 @@ export const useTasks = () => {
   useEffect(() => {
     let mounted = true;
 
-    fetchTasks()
-      .then((remoteTasks) => {
-        if (mounted) setTasks(remoteTasks);
-      })
+    const sync = (next: Task[]) => {
+      if (mounted) setTasks(next);
+    };
+
+    listeners.add(sync);
+
+    if (taskSnapshot) {
+      setTasks(taskSnapshot);
+    }
+
+    refreshTasks()
       .catch(() => {
         if (mounted) setTasks([]);
       });
 
-    const fn = () => {
-      fetchTasks().then((remoteTasks) => setTasks(remoteTasks));
+    const handleExternalRefresh = () => {
+      void refreshTasks();
     };
 
-    listeners.add(fn);
+    window.addEventListener("focus", handleExternalRefresh);
+    window.addEventListener("storage", handleExternalRefresh);
+    window.addEventListener("taiskmaster:tasks-changed", handleExternalRefresh);
     return () => {
       mounted = false;
-      listeners.delete(fn);
+      listeners.delete(sync);
+      window.removeEventListener("focus", handleExternalRefresh);
+      window.removeEventListener("storage", handleExternalRefresh);
+      window.removeEventListener("taiskmaster:tasks-changed", handleExternalRefresh);
     };
   }, []);
 
-  const persist = useCallback((next: Task[] | ((current: Task[]) => Task[])) => {
-    setTasks(next);
-    notify();
+  const persist = useCallback((next: Task[]) => {
+    publishTasks(next);
+    window.dispatchEvent(new Event("taiskmaster:tasks-changed"));
   }, []);
 
   const addTask = useCallback(async (t: Omit<Task, "id" | "createdAt">) => {
     const nextTask = await createTask(t);
-    persist((current) => [...current, nextTask]);
+    await refreshTasks();
     return nextTask;
-  }, [persist]);
+  }, []);
 
   const updateTask = useCallback(async (id: string, patch: Partial<Task>) => {
-    const nextTask = await patchTask(id, patch);
-    persist((current) => current.map((t) => (t.id === id ? nextTask : t)));
-  }, [persist]);
+    await patchTask(id, patch);
+    await refreshTasks();
+  }, []);
 
   const deleteTask = useCallback(async (id: string) => {
     await deleteRemoteTask(id);
-    persist((current) => current.filter((t) => t.id !== id));
-  }, [persist]);
+    await refreshTasks();
+  }, []);
+
+  const deleteCalendar = useCallback(async () => {
+    await deleteAllRemoteTasks(tasks);
+    await refreshTasks();
+  }, [tasks]);
 
   const replaceAll = useCallback(async (next: Task[]) => {
-    if (!hasBackend) {
+    if (!isAuthenticated()) {
       saveLocal(next);
       persist(next);
       return;
@@ -252,22 +290,22 @@ export const useTasks = () => {
     const nextIds = new Set(next.map((task) => task.id));
     await Promise.all(tasks.filter((task) => !nextIds.has(task.id)).map((task) => deleteRemoteTask(task.id)));
 
-    persist(next);
+    await refreshTasks();
   }, [persist, tasks]);
 
   const toggleComplete = useCallback(async (id: string) => {
     const task = tasks.find((t) => t.id === id);
     if (!task) return;
-    const nextTask = await patchTask(id, { completed: !task.completed });
-    persist((current) => current.map((t) => (t.id === id ? nextTask : t)));
-  }, [persist, tasks]);
+    await patchTask(id, { completed: !task.completed });
+    await refreshTasks();
+  }, [tasks]);
 
-  return { tasks, addTask, updateTask, deleteTask, replaceAll, toggleComplete };
+  return { tasks, addTask, updateTask, deleteTask, deleteCalendar, replaceAll, toggleComplete };
 };
 
 // ---------- Sorting & optimization ----------
 
-const priorityWeight = { high: 0, medium: 1, low: 2 } as const;
+const priorityWeight = { urgent: 0, high: 1, medium: 2, low: 3, "very-low": 4 } as const;
 
 export const sortTasks = (tasks: Task[], mode: SortMode): Task[] => {
   const arr = [...tasks];

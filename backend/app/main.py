@@ -15,17 +15,29 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 from app.models import db
 db.init_app(app)
 
+def get_allowed_origins():
+    origins = {
+        origin.strip()
+        for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080").split(",")
+        if origin.strip()
+    }
+    if "http://localhost:8080" in origins:
+        origins.add("http://127.0.0.1:8080")
+    if "http://127.0.0.1:8080" in origins:
+        origins.add("http://localhost:8080")
+    return sorted(origins)
+
 # Configure CORS
 CORS(app, resources={
     r"/api/*": {
-        "origins": os.getenv("ALLOWED_ORIGINS", "http://localhost:8080").split(","),
-        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        "origins": get_allowed_origins(),
+        "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"]
     }
 })
 
 # Import models to ensure they are registered
-from app.models import User, Task, Conversation, Message
+from app.models import User, Task, Conversation, Message, ActivityScore
 
 # Create all tables
 with app.app_context():

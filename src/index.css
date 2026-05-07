@@ -39,9 +39,11 @@
     --warning: 35 95% 55%;
 
     /* Priority tokens */
+    --priority-very-low: 145 60% 42%;
     --priority-low: 200 70% 55%;
     --priority-medium: 35 95% 55%;
     --priority-high: 0 75% 58%;
+    --priority-urgent: 330 75% 54%;
 
     --border: 220 15% 91%;
     --input: 220 15% 91%;
