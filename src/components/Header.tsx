@@ -1,8 +1,7 @@
-import { ListTodo, Moon, Sun, LogOut, Settings, Trash2, UserCircle2, CheckCircle2, BarChart3, UploadCloud, Sparkles } from "lucide-react";
+import { ListTodo, LogOut, Settings, Trash2, UserCircle2, CheckCircle2, BarChart3, UploadCloud, Sparkles, Palette, Sun, Moon, History, Repeat } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTheme } from "next-themes";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { toast } from "sonner";
@@ -14,6 +13,9 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -25,16 +27,18 @@ interface Props {
   onDeleteCalendar?: () => void | Promise<void>;
   onShowCompletedTasks?: () => void;
   onShowActivityScores?: () => void;
+  onShowTaskHistory?: () => void;
+  onShowRoutineProfiles?: () => void;
   showActions?: boolean;
 }
 
-export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalendar, onShowCompletedTasks, onShowActivityScores, showActions = true }: Props) => {
+export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalendar, onShowCompletedTasks, onShowActivityScores, onShowTaskHistory, onShowRoutineProfiles, showActions = true }: Props) => {
   const { pathname } = useLocation();
   const { theme, resolvedTheme, setTheme } = useTheme();
   const { logout, user, updateProfile } = useAuth();
   const navigate = useNavigate();
+  const [styleMode, setStyleMode] = useState<"blue" | "green" | "pink" | "red" | "grey">("blue");
   const [mounted, setMounted] = useState(false);
-  const [currentTime, setCurrentTime] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileForm, setProfileForm] = useState({
@@ -49,17 +53,13 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
   }, []);
 
   useEffect(() => {
-    const formatter = new Intl.DateTimeFormat(undefined, {
-      weekday: "short",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    const stored = localStorage.getItem("taiskmaster.style");
+    const next = stored === "green" || stored === "pink" || stored === "red" || stored === "grey" ? stored : "blue";
+    setStyleMode(next);
 
-    const syncTime = () => setCurrentTime(formatter.format(new Date()));
-    syncTime();
-
-    const interval = window.setInterval(syncTime, 1000);
-    return () => window.clearInterval(interval);
+    const root = document.documentElement;
+    root.classList.remove("style-blue", "style-green", "style-pink", "style-red", "style-grey");
+    root.classList.add(`style-${next}`);
   }, []);
 
   const handleLogout = () => {
@@ -103,75 +103,56 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
     }
   };
 
+  const applyStyle = (style: "blue" | "green" | "pink" | "red" | "grey") => {
+    setStyleMode(style);
+    localStorage.setItem("taiskmaster.style", style);
+    const root = document.documentElement;
+    root.classList.remove("style-blue", "style-green", "style-pink", "style-red", "style-grey");
+    root.classList.add(`style-${style}`);
+  };
   const currentTheme = theme === "system" ? resolvedTheme : theme;
   const isDark = currentTheme === "dark";
 
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 glass">
       <div className="container flex h-16 items-center justify-between gap-4">
-        <Link to="/" className="group flex items-center gap-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-primary shadow-sm-soft transition-transform duration-300 ease-spring group-hover:scale-105">
-            <ListTodo className="h-5 w-5 text-primary-foreground" />
-          </div>
+        <div className="group flex items-center gap-2.5">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-label="Switch section"
+                className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-primary shadow-sm-soft transition-transform duration-300 ease-spring group-hover:scale-105"
+              >
+                <ListTodo className="h-5 w-5 text-primary-foreground" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-52">
+              <DropdownMenuLabel>Switch to</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => navigate("/")}>
+                Dashboard {pathname === "/" ? "✓" : ""}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => navigate("/smart-routine")}>
+                Smart Routine {pathname.startsWith("/smart-routine") ? "✓" : ""}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => navigate("/smart-vacation")}>
+                Smart Vacation {pathname.startsWith("/smart-vacation") ? "✓" : ""}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => navigate("/smart-statistics")}>
+                Smart Statistics {pathname.startsWith("/smart-statistics") ? "✓" : ""}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Link to="/" className="leading-tight">
           <div className="leading-tight">
             <div className="flex items-center gap-2">
               <p className="text-[15px] font-semibold tracking-tight">Taiskmaster</p>
-              {currentTime && (
-                <span className="rounded-full border border-border bg-card px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                  {currentTime}
-                </span>
-              )}
             </div>
             <p className="text-[11px] text-muted-foreground">Scheduling, refined</p>
           </div>
-        </Link>
-
-        <nav className="hidden md:flex items-center gap-1">
-          <Link
-            to="/"
-            className={cn(
-              "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-              pathname === "/"
-                ? "bg-secondary text-foreground"
-                : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
-            )}
-          >
-            Dashboard
           </Link>
-          <Link
-            to="/smart-routine"
-            className={cn(
-              "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-              pathname.startsWith("/smart-routine")
-                ? "bg-secondary text-foreground"
-                : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
-            )}
-          >
-            Smart Routine
-          </Link>
-          <Link
-            to="/smart-vacation"
-            className={cn(
-              "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-              pathname.startsWith("/smart-vacation")
-                ? "bg-secondary text-foreground"
-                : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
-            )}
-          >
-            Smart Vacation
-          </Link>
-          <Link
-            to="/smart-statistics"
-            className={cn(
-              "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-              pathname.startsWith("/smart-statistics")
-                ? "bg-secondary text-foreground"
-                : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
-            )}
-          >
-            Smart Statistics
-          </Link>
-        </nav>
+        </div>
 
         {showActions && (
           <div className="flex items-center gap-2">
@@ -197,14 +178,45 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
                   <UserCircle2 className="mr-2 h-4 w-4" />
                   Profile
                 </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() => setTheme(isDark ? "light" : "dark")}
-                  disabled={!mounted}
-                  aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
-                >
-                  {mounted && (isDark ? <Sun className="mr-2 h-4 w-4" /> : <Moon className="mr-2 h-4 w-4" />)}
-                  {!mounted ? "Theme" : isDark ? "Light mode" : "Dark mode"}
-                </DropdownMenuItem>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>
+                    <Palette className="mr-2 h-4 w-4" />
+                    Interface
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="w-52">
+                    <DropdownMenuLabel>Theme mode</DropdownMenuLabel>
+                    <DropdownMenuItem
+                      onSelect={() => setTheme(isDark ? "light" : "dark")}
+                      disabled={!mounted}
+                      aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
+                    >
+                      {mounted && (isDark ? <Sun className="mr-2 h-4 w-4" /> : <Moon className="mr-2 h-4 w-4" />)}
+                      {!mounted ? "Theme mode" : isDark ? "Light mode" : "Dark mode"}
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel>Color style</DropdownMenuLabel>
+                    <DropdownMenuItem onSelect={() => applyStyle("blue")} aria-label="Blue style">
+                      <Palette className="mr-2 h-4 w-4" />
+                      Blue {styleMode === "blue" ? "✓" : ""}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => applyStyle("green")} aria-label="Green style">
+                      <Palette className="mr-2 h-4 w-4" />
+                      Green {styleMode === "green" ? "✓" : ""}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => applyStyle("pink")} aria-label="Pink style">
+                      <Palette className="mr-2 h-4 w-4" />
+                      Pink {styleMode === "pink" ? "✓" : ""}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => applyStyle("red")} aria-label="Red style">
+                      <Palette className="mr-2 h-4 w-4" />
+                      Red {styleMode === "red" ? "✓" : ""}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => applyStyle("grey")} aria-label="Grey style">
+                      <Palette className="mr-2 h-4 w-4" />
+                      Grey {styleMode === "grey" ? "✓" : ""}
+                    </DropdownMenuItem>
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
                 <DropdownMenuItem onSelect={onShowCompletedTasks} disabled={!onShowCompletedTasks}>
                   <CheckCircle2 className="mr-2 h-4 w-4" />
                   Done tasks
@@ -212,6 +224,14 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
                 <DropdownMenuItem onSelect={onShowActivityScores} disabled={!onShowActivityScores}>
                   <BarChart3 className="mr-2 h-4 w-4" />
                   Activity Scores
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={onShowTaskHistory} disabled={!onShowTaskHistory}>
+                  <History className="mr-2 h-4 w-4" />
+                  Task history
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={onShowRoutineProfiles} disabled={!onShowRoutineProfiles}>
+                  <Repeat className="mr-2 h-4 w-4" />
+                  Routines
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={onImportCalendar} disabled={!onImportCalendar}>
                   <UploadCloud className="mr-2 h-4 w-4" />

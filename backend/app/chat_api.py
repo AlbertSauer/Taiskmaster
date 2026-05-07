@@ -404,17 +404,26 @@ def _extract_recurring_weekdays(text):
     if not re.search(r"\bevery\b", text, re.IGNORECASE):
         return []
 
-    seen = set()
-    weekdays = []
-    for match in re.finditer(
-        r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+    # Extract weekdays only from "every ..." clauses, so unrelated text like
+    # "it put them on Wednesdays" does not get interpreted as a new rule.
+    clause_matches = re.finditer(
+        r"\bevery\s+(.+?)(?=\b(?:for|from|at|starting|start|this month|next month|until)\b|[.,;]|$)",
         text,
         re.IGNORECASE,
-    ):
-        weekday = match.group(1).lower()
-        if weekday not in seen:
-            seen.add(weekday)
-            weekdays.append(weekday)
+    )
+    seen = set()
+    weekdays = []
+    for clause in clause_matches:
+        segment = clause.group(1)
+        for day_match in re.finditer(
+            r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b",
+            segment,
+            re.IGNORECASE,
+        ):
+            weekday = day_match.group(1).lower()
+            if weekday not in seen:
+                seen.add(weekday)
+                weekdays.append(weekday)
     return weekdays
 
 
@@ -900,6 +909,16 @@ def _pin_recommendations_to_date(recommendations, target_date):
 
 
 def _normalize_optimized_task(candidate, original):
+    title_original = str(original.get("title") or "").strip().lower()
+    original_tags = original.get("tags") if isinstance(original.get("tags"), list) else []
+    normalized_original_tags = {str(tag).strip().lower() for tag in original_tags}
+    is_locked_work_task = (
+        title_original == "work hours"
+        or title_original.startswith("work break")
+        or "work" in normalized_original_tags
+        or "work-break" in normalized_original_tags
+    )
+
     source_text = " ".join(
         part for part in [
             str(candidate.get("title") or original.get("title") or "").strip(),
@@ -923,6 +942,15 @@ def _normalize_optimized_task(candidate, original):
         "tags": candidate.get("tags") if isinstance(candidate.get("tags"), list) else (original.get("tags") if isinstance(original.get("tags"), list) else []),
         "completed": bool(candidate.get("completed", original.get("completed", False))),
     }
+
+    if is_locked_work_task:
+        merged["title"] = str(original.get("title") or merged["title"]).strip()
+        merged["date"] = str(original.get("date") or merged["date"]).strip()
+        merged["time"] = original.get("time")
+        merged["duration"] = original.get("duration")
+        merged["location"] = original.get("location")
+        merged["tags"] = original_tags
+
     _align_task_date_to_request(merged, source_text)
     return merged
 
@@ -1055,6 +1083,409 @@ def _activity_insights_fallback(tasks):
             },
         },
     }
+
+
+def _routine_start_date():
+    return datetime.now().date()
+
+
+def _date_for_weekday(start_date, weekday_name, week_offset):
+    current = start_date + timedelta(days=week_offset * 7)
+    target_weekday = WEEKDAY_LOOKUP.get(weekday_name, 0)
+    while current.weekday() != target_weekday:
+        current += timedelta(days=1)
+    return current.strftime("%Y-%m-%d")
+
+
+def _routine_task(title, date, time, duration, priority="medium", tags=None, description=None, location=None):
+    return {
+        "title": title,
+        "description": description or f"Routine block: {title}.",
+        "date": date,
+        "time": time,
+        "duration": int(duration),
+        "location": location,
+        "priority": priority,
+        "tags": tags or [],
+        "completed": False,
+    }
+
+
+def _parse_routine_end_date(end_date):
+    if isinstance(end_date, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", end_date):
+        try:
+            return datetime.strptime(end_date, "%Y-%m-%d").date()
+        except Exception:
+            pass
+    return (datetime.now() + timedelta(days=28)).date()
+
+
+def _normalize_work_breaks(questionnaire):
+    raw_work_breaks = questionnaire.get("work_breaks") if isinstance(questionnaire.get("work_breaks"), list) else []
+    work_breaks = []
+    for item in raw_work_breaks:
+        if not isinstance(item, dict):
+            continue
+        time_value = _normalize_task_time(item.get("time") or "12:00")
+        duration_value = max(10, min(120, int(item.get("duration") or 30)))
+        work_breaks.append({"time": time_value, "duration": duration_value})
+    work_breaks.sort(key=lambda b: _time_to_minutes(b["time"]))
+    return work_breaks
+
+
+def _build_workday_blocks(day, day_date, work_start_time, work_end_time, work_breaks):
+    start_minutes = _time_to_minutes(work_start_time)
+    end_minutes = _time_to_minutes(work_end_time)
+    if end_minutes <= start_minutes:
+        end_minutes = start_minutes + 8 * 60
+
+    blocks = []
+    cursor = start_minutes
+    break_index = 1
+
+    for br in work_breaks:
+        break_start = _time_to_minutes(br["time"])
+        break_duration = int(br["duration"])
+        break_end = min(end_minutes, break_start + break_duration)
+        if break_start <= start_minutes or break_start >= end_minutes:
+            continue
+        if break_start > cursor:
+            blocks.append(_routine_task(
+                title="Work Hours",
+                date=day_date,
+                time=f"{cursor // 60:02d}:{cursor % 60:02d}",
+                duration=max(15, break_start - cursor),
+                priority="high",
+                tags=["routine", "work", day],
+                description="Work block generated from your configured working hours.",
+            ))
+        if break_end > break_start:
+            blocks.append(_routine_task(
+                title=f"Work Break {break_index}",
+                date=day_date,
+                time=f"{break_start // 60:02d}:{break_start % 60:02d}",
+                duration=max(10, break_end - break_start),
+                priority="medium",
+                tags=["routine", "work-break", day],
+                description="Planned work break from your configured schedule.",
+            ))
+            break_index += 1
+        cursor = max(cursor, break_end)
+
+    if cursor < end_minutes:
+        blocks.append(_routine_task(
+            title="Work Hours",
+            date=day_date,
+            time=f"{cursor // 60:02d}:{cursor % 60:02d}",
+            duration=max(15, end_minutes - cursor),
+            priority="high",
+            tags=["routine", "work", day],
+            description="Work block generated from your configured working hours.",
+        ))
+    return blocks
+
+
+def _generate_routine_fallback(end_date, questionnaire):
+    working_days = questionnaire.get("working_days") or ["monday", "tuesday", "wednesday", "thursday", "friday"]
+    if not isinstance(working_days, list) or not working_days:
+        working_days = ["monday", "tuesday", "wednesday", "thursday", "friday"]
+    working_days = [str(day).lower() for day in working_days if str(day).lower() in WEEKDAY_LOOKUP]
+    if not working_days:
+        working_days = ["monday", "tuesday", "wednesday", "thursday", "friday"]
+
+    energy_peak_time = _normalize_task_time(questionnaire.get("energy_peak_time") or "10:00")
+    learning_minutes_per_week = max(0, min(1200, int(questionnaire.get("learning_minutes_per_week") or 180)))
+    selfcare_minutes_per_week = max(0, min(1200, int(questionnaire.get("selfcare_minutes_per_week") or 120)))
+    workout_per_week = max(0, min(7, int(questionnaire.get("workout_per_week") or 3)))
+    workout_duration = max(15, min(180, int(questionnaire.get("workout_duration") or 60)))
+    work_start_time = _normalize_task_time(questionnaire.get("work_start_time") or "09:00")
+    work_end_time = _normalize_task_time(questionnaire.get("work_end_time") or "17:00")
+    work_breaks = _normalize_work_breaks(questionnaire)
+
+    focus_time = energy_peak_time
+    auto_break_duration = 20
+    per_day_learning = 0
+    if len(working_days) > 0:
+        per_day_learning = int(round(learning_minutes_per_week / len(working_days)))
+    learning_duration = max(0, min(120, per_day_learning))
+    try:
+        work_start_minutes = _time_to_minutes(work_start_time)
+        work_end_minutes = _time_to_minutes(work_end_time)
+        if work_end_minutes <= work_start_minutes:
+            work_end_minutes = work_start_minutes + 8 * 60
+        work_duration = max(60, min(12 * 60, work_end_minutes - work_start_minutes))
+    except Exception:
+        work_duration = 8 * 60
+
+    tasks = []
+    start_date = _routine_start_date()
+    weekday_order = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    sorted_workdays = sorted(working_days, key=lambda day: weekday_order.index(day))
+
+    parsed_end_date = _parse_routine_end_date(end_date)
+    max_weeks = 52
+
+    for week in range(max_weeks):
+        week_has_tasks = False
+        for day in sorted_workdays:
+            day_date = _date_for_weekday(start_date, day, week)
+            day_date_obj = datetime.strptime(day_date, "%Y-%m-%d").date()
+            if day_date_obj > parsed_end_date:
+                continue
+            week_has_tasks = True
+            tasks.extend(_build_workday_blocks(day, day_date, work_start_time, work_end_time, work_breaks))
+            tasks.append(_routine_task(
+                title="Deep Work Block",
+                date=day_date,
+                time=focus_time if _time_to_minutes(focus_time) >= _time_to_minutes(work_start_time) else work_start_time,
+                duration=90,
+                priority="high",
+                tags=["routine", "focus", day],
+                description="Protected deep-focus block for high-value work.",
+            ))
+            tasks.append(_routine_task(
+                title="Recovery Break",
+                date=day_date,
+                time="12:30",
+                duration=auto_break_duration,
+                priority="medium",
+                tags=["routine", "break", day],
+                description="Recommended recovery break to avoid burnout.",
+            ))
+            if learning_duration > 0:
+                tasks.append(_routine_task(
+                    title="Learning Session",
+                    date=day_date,
+                    time="19:00",
+                    duration=learning_duration,
+                    priority="medium",
+                    tags=["routine", "learning", day],
+                    description="Skill-growth block based on your target learning minutes.",
+                ))
+
+        if workout_per_week > 0:
+            workout_days = sorted_workdays[:min(len(sorted_workdays), workout_per_week)]
+            for day in workout_days:
+                day_date = _date_for_weekday(start_date, day, week)
+                day_date_obj = datetime.strptime(day_date, "%Y-%m-%d").date()
+                if day_date_obj > parsed_end_date:
+                    continue
+                tasks.append(_routine_task(
+                    title="Workout Session",
+                    date=day_date,
+                    time="17:30",
+                    duration=workout_duration,
+                    priority="medium",
+                    tags=["routine", "health", "sports", day],
+                    description="Scheduled movement block for energy and recovery.",
+                ))
+
+        if selfcare_minutes_per_week > 0:
+            selfcare_days = sorted_workdays[:max(1, min(len(sorted_workdays), 3))]
+            per_session = max(15, min(90, int(round(selfcare_minutes_per_week / len(selfcare_days)))))
+            for day in selfcare_days:
+                day_date = _date_for_weekday(start_date, day, week)
+                day_date_obj = datetime.strptime(day_date, "%Y-%m-%d").date()
+                if day_date_obj > parsed_end_date:
+                    continue
+                tasks.append(_routine_task(
+                    title="Selfcare Time",
+                    date=day_date,
+                    time="20:30",
+                    duration=per_session,
+                    priority="medium",
+                    tags=["routine", "selfcare", day],
+                    description="Personal selfcare block based on your weekly target.",
+                ))
+
+        planning_day = "sunday" if "sunday" in WEEKDAY_LOOKUP else "friday"
+        planning_date = _date_for_weekday(start_date, planning_day, week)
+        planning_date_obj = datetime.strptime(planning_date, "%Y-%m-%d").date()
+        if planning_date_obj <= parsed_end_date:
+            tasks.append(_routine_task(
+                title="Weekly Planning Review",
+                date=planning_date,
+                time="18:00",
+                duration=40,
+                priority="high",
+                tags=["routine", "planning"],
+                description="Review upcoming week, adjust priorities, and prepare key tasks.",
+            ))
+
+        if not week_has_tasks:
+            break
+
+    return tasks
+
+
+def _normalize_task_time(value):
+    parsed = _parse_time(str(value or ""))
+    return parsed or "09:00"
+
+
+def _routine_signature(task):
+    title = str(task.get("title") or "").strip().lower()
+    date = str(task.get("date") or "").strip()
+    time = _normalize_task_time(task.get("time"))
+    return f"{title}|{date}|{time}"
+
+
+def _ranges_overlap(start_a, duration_a, start_b, duration_b):
+    a0 = _time_to_minutes(start_a)
+    a1 = a0 + int(duration_a or 60)
+    b0 = _time_to_minutes(start_b)
+    b1 = b0 + int(duration_b or 60)
+    return not (a1 <= b0 or b1 <= a0)
+
+
+def _fit_and_dedupe_routine_tasks(generated_tasks, existing_tasks):
+    existing = [task for task in (existing_tasks or []) if isinstance(task, dict) and task.get("date")]
+    existing_signatures = {_routine_signature(task) for task in existing}
+    accepted = []
+
+    for task in generated_tasks:
+        if not isinstance(task, dict):
+            continue
+
+        task["date"] = _normalize_iso_date(task.get("date"))
+        task["time"] = _normalize_task_time(task.get("time"))
+        task["duration"] = int(task.get("duration") or 60)
+
+        signature = _routine_signature(task)
+        if signature in existing_signatures:
+            continue
+        if any(_routine_signature(other) == signature for other in accepted):
+            continue
+
+        # Avoid overlapping existing tasks on the same day.
+        day_existing = [item for item in existing if str(item.get("date")) == task["date"] and item.get("time")]
+        day_existing += [item for item in accepted if str(item.get("date")) == task["date"] and item.get("time")]
+
+        conflict = False
+        for item in day_existing:
+            existing_time = _normalize_task_time(item.get("time"))
+            existing_duration = int(item.get("duration") or 60)
+            if _ranges_overlap(task["time"], task["duration"], existing_time, existing_duration):
+                conflict = True
+                break
+
+        if conflict:
+            proposed = _suggest_time_for_date(existing + accepted, task["date"], task["duration"], preferred_time=task["time"])
+            task["time"] = _normalize_task_time(proposed)
+            # Re-check after shifting
+            still_conflict = False
+            for item in day_existing:
+                existing_time = _normalize_task_time(item.get("time"))
+                existing_duration = int(item.get("duration") or 60)
+                if _ranges_overlap(task["time"], task["duration"], existing_time, existing_duration):
+                    still_conflict = True
+                    break
+            if still_conflict:
+                continue
+
+        accepted.append(task)
+
+    return accepted
+
+
+def _ensure_work_blocks_for_all_workdays(current_tasks, questionnaire, end_date, existing_tasks):
+    working_days = questionnaire.get("working_days") or ["monday", "tuesday", "wednesday", "thursday", "friday"]
+    if not isinstance(working_days, list):
+        working_days = []
+    working_days = [str(day).lower() for day in working_days if str(day).lower() in WEEKDAY_LOOKUP]
+    if not working_days:
+        working_days = ["monday", "tuesday", "wednesday", "thursday", "friday"]
+
+    work_start_time = _normalize_task_time(questionnaire.get("work_start_time") or "09:00")
+    work_end_time = _normalize_task_time(questionnaire.get("work_end_time") or "17:00")
+    work_breaks = _normalize_work_breaks(questionnaire)
+
+    start_date = _routine_start_date()
+    parsed_end_date = _parse_routine_end_date(end_date)
+    working_dates = set()
+    enforced_work_tasks = []
+    cursor = start_date
+    while cursor <= parsed_end_date:
+        day_name = cursor.strftime("%A").lower()
+        day_date = cursor.strftime("%Y-%m-%d")
+        if day_name in working_days:
+            working_dates.add(day_date)
+            enforced_work_tasks.extend(_build_workday_blocks(day_name, day_date, work_start_time, work_end_time, work_breaks))
+        cursor += timedelta(days=1)
+
+    if not enforced_work_tasks:
+        return current_tasks or []
+
+    preserved_tasks = []
+    for task in (current_tasks or []):
+        if not isinstance(task, dict):
+            continue
+        date_value = _normalize_iso_date(task.get("date"))
+        tags = task.get("tags") if isinstance(task.get("tags"), list) else []
+        normalized_tags = {str(tag).strip().lower() for tag in tags}
+        is_work_related = "work" in normalized_tags or "work-break" in normalized_tags or str(task.get("title") or "").strip().lower().startswith("work break") or str(task.get("title") or "").strip().lower() == "work hours"
+        if date_value in working_dates and is_work_related:
+            continue
+        preserved_tasks.append(task)
+
+    merged = preserved_tasks + enforced_work_tasks
+    deduped = []
+    seen = set()
+    for task in merged:
+        signature = _routine_signature(task)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        deduped.append(task)
+    return deduped
+
+
+def _enforce_routine_time_relations(tasks, questionnaire):
+    if not isinstance(tasks, list):
+        return []
+    working_days = questionnaire.get("working_days") or ["monday", "tuesday", "wednesday", "thursday", "friday"]
+    if not isinstance(working_days, list):
+        working_days = []
+    working_days = {str(day).lower() for day in working_days if str(day).lower() in WEEKDAY_LOOKUP}
+    if not working_days:
+        working_days = {"monday", "tuesday", "wednesday", "thursday", "friday"}
+
+    wake_time = _normalize_task_time(questionnaire.get("wake_time") or "07:00")
+    work_start_time = _normalize_task_time(questionnaire.get("work_start_time") or "09:00")
+    wake_minutes = _time_to_minutes(wake_time)
+    work_start_minutes = _time_to_minutes(work_start_time)
+    if work_start_minutes <= wake_minutes:
+        return tasks
+
+    adjusted = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        date_value = _normalize_iso_date(task.get("date"))
+        try:
+            weekday = datetime.strptime(date_value, "%Y-%m-%d").strftime("%A").lower()
+        except Exception:
+            weekday = ""
+
+        tags = task.get("tags") if isinstance(task.get("tags"), list) else []
+        normalized_tags = {str(tag).strip().lower() for tag in tags}
+        title = str(task.get("title") or "").strip().lower()
+        is_work_activity = (
+            "work" in normalized_tags
+            or "work-break" in normalized_tags
+            or "focus" in normalized_tags
+            or title.startswith("work break")
+            or title in {"work hours", "deep work block"}
+        )
+
+        if is_work_activity and weekday in working_days:
+            current_time = _normalize_task_time(task.get("time"))
+            current_minutes = _time_to_minutes(current_time)
+            if wake_minutes <= current_minutes < work_start_minutes:
+                task["time"] = work_start_time
+
+        adjusted.append(task)
+    return adjusted
 
 
 @chat_bp.route("", methods=["POST"])
@@ -1464,5 +1895,118 @@ def activity_scores():
                 "created_at": score.created_at.isoformat(),
             }
             for score in scores
+        ]
+    }), 200
+
+
+@chat_bp.post("/routine-plan")
+@token_required
+def routine_plan():
+    payload = request.get_json(silent=True) or {}
+    end_date = payload.get("end_date")
+    questionnaire = payload.get("questionnaire") or {}
+    existing_tasks = payload.get("existing_tasks") or []
+
+    if not isinstance(questionnaire, dict):
+        questionnaire = {}
+    if not isinstance(existing_tasks, list):
+        existing_tasks = []
+
+    fallback_tasks = _generate_routine_fallback(end_date, questionnaire)
+    generated_tasks = fallback_tasks
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        try:
+            client = OpenAI(api_key=api_key)
+            prompt = (
+                f"Today: {datetime.now().strftime('%Y-%m-%d')}.\n"
+                f"Questionnaire JSON:\n{json.dumps(questionnaire, ensure_ascii=True)}\n"
+                f"Plan end date: {_parse_routine_end_date(end_date).strftime('%Y-%m-%d')}\n"
+                f"Existing tasks:\n{_build_task_context(existing_tasks) or '- none'}\n"
+                "Return strict JSON with key tasks as an array. "
+                "Each task must include: title, description, date(YYYY-MM-DD), time(HH:MM), duration(minutes), location, priority, tags(array), completed(false). "
+                "Generate a realistic working routine for the full period and avoid obvious overlaps inside the generated routine."
+            )
+            completion = client.chat.completions.create(
+                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": "You generate practical weekly routines and return strict JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=2200,
+                temperature=0.5,
+            )
+            content = completion.choices[0].message.content or "{}"
+            parsed = json.loads(content)
+            candidate_tasks = parsed.get("tasks", [])
+            if isinstance(candidate_tasks, list) and candidate_tasks:
+                normalized = []
+                for task in candidate_tasks:
+                    if not isinstance(task, dict):
+                        continue
+                    normalized.append({
+                        "title": str(task.get("title") or "Routine task").strip(),
+                        "description": str(task.get("description") or "Routine-generated task.").strip()[:140],
+                        "date": _normalize_iso_date(task.get("date")),
+                        "time": _parse_time(str(task.get("time") or "")) or "09:00",
+                        "duration": int(task.get("duration") or 60),
+                        "location": str(task.get("location") or "").strip() or None,
+                        "priority": _normalize_priority(task.get("priority"), str(task.get("title") or "")),
+                        "tags": task.get("tags") if isinstance(task.get("tags"), list) else ["routine"],
+                        "completed": False,
+                    })
+                if normalized:
+                    generated_tasks = normalized
+        except Exception:
+            pass
+
+    final_tasks = _fit_and_dedupe_routine_tasks(generated_tasks, existing_tasks)
+    if not final_tasks:
+        final_tasks = _fit_and_dedupe_routine_tasks(fallback_tasks, existing_tasks)
+    if not final_tasks:
+        final_tasks = fallback_tasks[:40]
+    final_tasks = _ensure_work_blocks_for_all_workdays(final_tasks, questionnaire, end_date, existing_tasks)
+    final_tasks = _enforce_routine_time_relations(final_tasks, questionnaire)
+    final_tasks = _fit_and_dedupe_routine_tasks(final_tasks, existing_tasks)
+    routine_profile_id = None
+    try:
+        from app.models import RoutineProfile, db
+        profile = RoutineProfile(
+            user_id=request.current_user.id,
+            name=f"Routine until {_parse_routine_end_date(end_date).strftime('%Y-%m-%d')}",
+            end_date=_parse_routine_end_date(end_date).strftime("%Y-%m-%d"),
+            questionnaire=questionnaire if isinstance(questionnaire, dict) else {},
+        )
+        db.session.add(profile)
+        db.session.commit()
+        routine_profile_id = profile.id
+    except Exception:
+        routine_profile_id = None
+
+    return jsonify({"tasks": final_tasks, "routine_profile_id": routine_profile_id}), 200
+
+
+@chat_bp.get("/routine-profiles")
+@token_required
+def routine_profiles():
+    from app.models import RoutineProfile, db
+    profiles = (
+        db.session.query(RoutineProfile)
+        .filter(RoutineProfile.user_id == request.current_user.id)
+        .order_by(RoutineProfile.created_at.desc())
+        .all()
+    )
+    return jsonify({
+        "profiles": [
+            {
+                "id": profile.id,
+                "name": profile.name,
+                "end_date": profile.end_date,
+                "questionnaire": profile.questionnaire or {},
+                "created_at": profile.created_at.isoformat(),
+            }
+            for profile in profiles
         ]
     }), 200

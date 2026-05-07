@@ -37,7 +37,7 @@ CORS(app, resources={
 })
 
 # Import models to ensure they are registered
-from app.models import User, Task, Conversation, Message, ActivityScore
+from app.models import User, Task, Conversation, Message, ActivityScore, TaskHistory, RoutineProfile
 
 # Create all tables
 with app.app_context():

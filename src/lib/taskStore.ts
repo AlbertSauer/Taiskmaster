@@ -23,6 +23,31 @@ type PersistableTask = Task & {
   created_at?: string;
 };
 
+export const inferTaskTags = (task: Pick<Task, "title" | "description" | "location" | "tags">): string[] => {
+  const existing = Array.isArray(task.tags)
+    ? task.tags.map((tag) => String(tag).trim().toLowerCase()).filter(Boolean)
+    : [];
+  const text = `${task.title || ""} ${task.description || ""} ${task.location || ""}`.toLowerCase();
+  const inferred: string[] = [];
+  const add = (tag: string) => {
+    if (!existing.includes(tag) && !inferred.includes(tag)) inferred.push(tag);
+  };
+
+  if (/\b(work|office|meeting|client|project)\b/.test(text)) add("work");
+  if (/\b(gym|workout|run|sports|exercise|fitness)\b/.test(text)) add("health");
+  if (/\b(study|learn|learning|course|read|reading)\b/.test(text)) add("learning");
+  if (/\b(family|partner|kids|friends|social)\b/.test(text)) add("personal");
+  if (/\b(travel|flight|train|trip|commute)\b/.test(text)) add("travel");
+  if (/\b(doctor|health|dentist|therapy|checkup)\b/.test(text)) add("health");
+  if (/\b(plan|planning|review)\b/.test(text)) add("planning");
+  if (/\b(break|selfcare|recovery|mindful|meditation)\b/.test(text)) add("selfcare");
+  if (/\b(home|house|clean|shopping|errand)\b/.test(text)) add("errand");
+  if (task.location && !existing.includes("location")) add("location");
+  if (inferred.length === 0 && existing.length === 0) add("general");
+
+  return [...existing, ...inferred].slice(0, 6);
+};
+
 const normalizeTask = (task: PersistableTask): Task => ({
   id: task.id,
   title: task.title,
@@ -134,8 +159,12 @@ const fetchTasks = async (): Promise<Task[]> => {
 };
 
 const createTask = async (task: Omit<Task, "id" | "createdAt">): Promise<Task> => {
+  const taskWithTags = {
+    ...task,
+    tags: inferTaskTags(task),
+  };
   if (!isAuthenticated()) {
-    const next: Task = { ...task, id: crypto.randomUUID(), createdAt: new Date().toISOString() };
+    const next: Task = { ...taskWithTags, id: crypto.randomUUID(), createdAt: new Date().toISOString() };
     const all = [...loadLocal(), next];
     saveLocal(all);
     return next;
@@ -144,7 +173,7 @@ const createTask = async (task: Omit<Task, "id" | "createdAt">): Promise<Task> =
   const res = await fetch(`${API_BASE}/api/tasks`, {
     method: "POST",
     headers: getAuthHeaders(),
-    body: JSON.stringify(task),
+    body: JSON.stringify(taskWithTags),
   });
   if (!res.ok) throw new Error("Could not create task");
   const created = await res.json();
@@ -306,6 +335,11 @@ export const useTasks = () => {
 // ---------- Sorting & optimization ----------
 
 const priorityWeight = { urgent: 0, high: 1, medium: 2, low: 3, "very-low": 4 } as const;
+const isLockedWorkTask = (task: Task) => {
+  const title = (task.title || "").trim().toLowerCase();
+  const tags = Array.isArray(task.tags) ? task.tags.map((tag) => String(tag).toLowerCase()) : [];
+  return title === "work hours" || title.startsWith("work break") || tags.includes("work") || tags.includes("work-break");
+};
 
 export const sortTasks = (tasks: Task[], mode: SortMode): Task[] => {
   const arr = [...tasks];
@@ -330,8 +364,19 @@ export const sortTasks = (tasks: Task[], mode: SortMode): Task[] => {
  *  4. High-priority items without time get pulled to the morning.
  */
 export const optimizeSchedule = (tasks: Task[]): Task[] => {
+  const dedupeSignature = (task: Task) =>
+    `${task.title.trim().toLowerCase()}|${task.date}|${(task.time ?? "").trim()}|${(task.location ?? "").trim().toLowerCase()}`;
+
+  const seen = new Set<string>();
+  const uniqueTasks = tasks.filter((task) => {
+    const key = dedupeSignature(task);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
   const byDate = new Map<string, Task[]>();
-  tasks.forEach((t) => {
+  uniqueTasks.forEach((t) => {
     const k = t.date;
     if (!byDate.has(k)) byDate.set(k, []);
     byDate.get(k)!.push(t);
@@ -356,23 +401,30 @@ export const optimizeSchedule = (tasks: Task[]): Task[] => {
       return pa - pb;
     });
 
-    let cursor = 9 * 60; // start the day at 09:00 in minutes
+    let cursor = 8 * 60 + 30; // start the day at 08:30 in minutes
     for (const [, group] of orderedGroups) {
       group.sort((a, b) => priorityWeight[a.priority] - priorityWeight[b.priority]
         || (a.time ?? "23:59").localeCompare(b.time ?? "23:59"));
       for (const t of group) {
-        let time = t.time;
-        if (!time) {
-          const h = Math.floor(cursor / 60).toString().padStart(2, "0");
-          const m = (cursor % 60).toString().padStart(2, "0");
-          time = `${h}:${m}`;
-          cursor += 60; // assume 1h slot
-        } else {
-          // advance cursor past this fixed task
-          const [h, m] = time.split(":").map(Number);
-          cursor = Math.max(cursor, h * 60 + m + 60);
+        if (isLockedWorkTask(t)) {
+          const existingTime = t.time ?? "09:00";
+          const duration = Math.max(15, t.duration ?? 60);
+          const [hStr, mStr] = existingTime.split(":");
+          const h = Number(hStr);
+          const m = Number(mStr);
+          if (!Number.isNaN(h) && !Number.isNaN(m)) {
+            const end = h * 60 + m + duration;
+            if (end > cursor) cursor = end;
+          }
+          result.push({ ...t, time: existingTime, duration });
+          continue;
         }
-        result.push({ ...t, time });
+        const duration = Math.max(15, t.duration ?? 60);
+        const h = Math.floor(cursor / 60).toString().padStart(2, "0");
+        const m = (cursor % 60).toString().padStart(2, "0");
+        const time = `${h}:${m}`;
+        cursor += duration;
+        result.push({ ...t, time, duration });
       }
       cursor += 15; // travel buffer between locations
     }

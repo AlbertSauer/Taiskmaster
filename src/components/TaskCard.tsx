@@ -1,13 +1,7 @@
-import { Calendar, Clock, MapPin, MoreHorizontal, Pencil, Trash2, Check } from "lucide-react";
+import { Calendar, Clock, MapPin, Trash2, Check } from "lucide-react";
 import type { Task } from "@/types/task";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { format, parseISO, isToday, isTomorrow, isPast } from "date-fns";
 
@@ -49,20 +43,36 @@ const formatDate = (iso: string) => {
   return format(d, "EEE, MMM d");
 };
 
+const formatTimeRange = (time?: string, duration?: number) => {
+  if (!time) return null;
+  const [h, m] = time.split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return time;
+  const length = typeof duration === "number" ? Math.max(15, duration) : 60;
+  const endTotal = (h * 60 + m + length) % (24 * 60);
+  const eh = Math.floor(endTotal / 60).toString().padStart(2, "0");
+  const em = (endTotal % 60).toString().padStart(2, "0");
+  return `${time} - ${eh}:${em}`;
+};
+
 export const TaskCard = ({ task, onEdit, onDelete, onToggle }: Props) => {
   const overdue = !task.completed && isPast(parseISO(task.date + "T23:59")) && !isToday(parseISO(task.date));
+  const timeRange = formatTimeRange(task.time, task.duration);
 
   return (
     <div
+      onClick={() => onEdit(task)}
       className={cn(
-        "group relative rounded-lg border border-border bg-card p-5 shadow-xs",
+        "group relative cursor-pointer rounded-lg border border-border bg-card p-5 shadow-xs",
         "transition-all duration-300 ease-smooth hover:shadow-md-soft hover:-translate-y-0.5 hover:border-primary/20",
         task.completed && "opacity-60",
       )}
     >
       <div className="flex items-start gap-3">
         <button
-          onClick={() => onToggle(task.id)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggle(task.id);
+          }}
           aria-label={task.completed ? "Mark as not done" : "Mark as done"}
           className={cn(
             "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 transition-all duration-200",
@@ -83,29 +93,20 @@ export const TaskCard = ({ task, onEdit, onDelete, onToggle }: Props) => {
               {task.title}
             </h3>
 
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="opacity-0 transition-opacity group-hover:opacity-100 data-[state=open]:opacity-100"
-                  aria-label="Task actions"
-                >
-                  <MoreHorizontal className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-40">
-                <DropdownMenuItem onClick={() => onEdit(task)}>
-                  <Pencil className="mr-2 h-4 w-4" /> Edit
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => onDelete(task.id)}
-                  className="text-destructive focus:text-destructive"
-                >
-                  <Trash2 className="mr-2 h-4 w-4" /> Delete
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <div className="flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(task.id);
+                }}
+                className="text-destructive hover:text-destructive"
+                aria-label="Delete task"
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
 
           {task.description && (
@@ -119,10 +120,10 @@ export const TaskCard = ({ task, onEdit, onDelete, onToggle }: Props) => {
               <Calendar className="h-3.5 w-3.5" />
               {formatDate(task.date)}
             </span>
-            {task.time && (
+            {timeRange && (
               <span className="inline-flex items-center gap-1.5">
                 <Clock className="h-3.5 w-3.5" />
-                {task.time}
+                {timeRange}
               </span>
             )}
             {typeof task.duration === "number" && (

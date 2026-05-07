@@ -19,6 +19,8 @@ class User(db.Model):
 
     conversations = db.relationship('Conversation', back_populates='user', cascade='all, delete-orphan')
     activity_scores = db.relationship('ActivityScore', back_populates='user', cascade='all, delete-orphan')
+    task_history = db.relationship('TaskHistory', back_populates='user', cascade='all, delete-orphan')
+    routine_profiles = db.relationship('RoutineProfile', back_populates='user', cascade='all, delete-orphan')
 
 
 class Task(db.Model):
@@ -79,3 +81,29 @@ class ActivityScore(db.Model):
 
     user = db.relationship('User', back_populates='activity_scores')
 
+
+class TaskHistory(db.Model):
+    __tablename__ = "task_history"
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(db.String(36), db.ForeignKey("users.id"), nullable=False, index=True)
+    task_id = db.Column(db.String(36), nullable=False, index=True)
+    action = db.Column(db.String(20), nullable=False)  # created | updated | deleted
+    title = db.Column(db.String(255), nullable=False)
+    snapshot = db.Column(db.JSON, nullable=False, default=dict)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    user = db.relationship('User', back_populates='task_history')
+
+
+class RoutineProfile(db.Model):
+    __tablename__ = "routine_profiles"
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(db.String(36), db.ForeignKey("users.id"), nullable=False, index=True)
+    name = db.Column(db.String(255), nullable=False)
+    end_date = db.Column(db.String(10), nullable=False)
+    questionnaire = db.Column(db.JSON, nullable=False, default=dict)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    user = db.relationship('User', back_populates='routine_profiles')

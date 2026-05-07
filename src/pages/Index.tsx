@@ -10,6 +10,7 @@ import { AssistantPanel, type AssistantAction } from "@/components/AssistantPane
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Select,
   SelectContent,
@@ -17,10 +18,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useTasks, sortTasks, optimizeSchedule } from "@/lib/taskStore";
+import { useTasks, sortTasks, optimizeSchedule, inferTaskTags } from "@/lib/taskStore";
 import { useAuth } from "@/hooks/useAuth";
 import type { SortMode, Task } from "@/types/task";
 import { format, isSameDay, parseISO, isToday } from "date-fns";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
@@ -71,18 +73,49 @@ interface ActivityScoreHistoryItem extends ActivityInsights {
   id: string;
   created_at: string;
 }
+interface TaskHistoryItem {
+  id: string;
+  task_id: string;
+  action: "created" | "updated" | "deleted";
+  title: string;
+  snapshot: Partial<Task>;
+  created_at: string;
+}
+interface RoutineProfileItem {
+  id: number;
+  name: string;
+  end_date: string;
+  questionnaire: Record<string, unknown>;
+  created_at: string;
+}
+interface OptimizeConflictSuggestion {
+  firstTaskTitle: string;
+  secondTaskTitle: string;
+  date: string;
+  suggestionDate: string;
+  suggestionTime: string;
+}
+const isLockedOptimizeTask = (task: Task) => {
+  const title = (task.title || "").trim().toLowerCase();
+  const tags = Array.isArray(task.tags) ? task.tags.map((tag) => String(tag).toLowerCase()) : [];
+  return title === "work hours" || title.startsWith("work break") || tags.includes("work") || tags.includes("work-break");
+};
 
 const Index = () => {
+  const navigate = useNavigate();
   const { user } = useAuth();
   const { tasks, addTask, updateTask, deleteTask, deleteCalendar, replaceAll, toggleComplete } = useTasks();
-  const [sort, setSort] = useState<SortMode>("priority");
+  const [sort, setSort] = useState<SortMode>("datetime");
   const [query, setQuery] = useState("");
   const [selectedDate, setSelectedDate] = useState<Date | undefined>(new Date());
+  const [dateFilter, setDateFilter] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [editing, setEditing] = useState<TaskDialogInitial | null>(null);
   const [completedDialogOpen, setCompletedDialogOpen] = useState(false);
   const [activityScoresOpen, setActivityScoresOpen] = useState(false);
+  const [taskHistoryOpen, setTaskHistoryOpen] = useState(false);
+  const [routineProfilesOpen, setRoutineProfilesOpen] = useState(false);
   const [recommendations, setRecommendations] = useState<Recommendation[]>([]);
   const [recommendationsOpen, setRecommendationsOpen] = useState(false);
   const [loadingRecommendations, setLoadingRecommendations] = useState(false);
@@ -93,10 +126,67 @@ const Index = () => {
   const [scoreHistory, setScoreHistory] = useState<ActivityScoreHistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [avgScoreLoading, setAvgScoreLoading] = useState(false);
+  const [taskHistory, setTaskHistory] = useState<TaskHistoryItem[]>([]);
+  const [taskHistoryLoading, setTaskHistoryLoading] = useState(false);
+  const [routineProfiles, setRoutineProfiles] = useState<RoutineProfileItem[]>([]);
+  const [routineProfilesLoading, setRoutineProfilesLoading] = useState(false);
+  const [optimizePreviewOpen, setOptimizePreviewOpen] = useState(false);
+  const [optimizePreviewTasks, setOptimizePreviewTasks] = useState<Task[]>([]);
+  const [optimizeRemovedCount, setOptimizeRemovedCount] = useState(0);
+  const optimizeConflicts = useMemo<OptimizeConflictSuggestion[]>(() => {
+    const byDate = new Map<string, Task[]>();
+    for (const task of optimizePreviewTasks) {
+      if (!byDate.has(task.date)) byDate.set(task.date, []);
+      byDate.get(task.date)!.push(task);
+    }
+
+    const conflicts: OptimizeConflictSuggestion[] = [];
+    for (const [date, dayTasks] of byDate.entries()) {
+      const ordered = [...dayTasks]
+        .filter((task) => !!task.time)
+        .sort((a, b) => (a.time ?? "").localeCompare(b.time ?? ""));
+
+      for (let i = 0; i < ordered.length - 1; i += 1) {
+        const current = ordered[i];
+        const next = ordered[i + 1];
+        if (!current.time || !next.time) continue;
+
+        const [ch, cm] = current.time.split(":").map(Number);
+        const [nh, nm] = next.time.split(":").map(Number);
+        const currentStart = ch * 60 + cm;
+        const nextStart = nh * 60 + nm;
+        const currentEnd = currentStart + Math.max(15, current.duration ?? 60);
+
+        if (nextStart < currentEnd) {
+          let suggestionMinutes = currentEnd + 15;
+          let suggestionDate = date;
+          if (suggestionMinutes > 21 * 60 + 30) {
+            const d = new Date(`${date}T00:00:00`);
+            d.setDate(d.getDate() + 1);
+            suggestionDate = format(d, "yyyy-MM-dd");
+            suggestionMinutes = 9 * 60;
+          }
+          const sh = Math.floor(suggestionMinutes / 60).toString().padStart(2, "0");
+          const sm = (suggestionMinutes % 60).toString().padStart(2, "0");
+          conflicts.push({
+            firstTaskTitle: current.title,
+            secondTaskTitle: next.title,
+            date,
+            suggestionDate,
+            suggestionTime: `${sh}:${sm}`,
+          });
+        }
+      }
+    }
+    return conflicts;
+  }, [optimizePreviewTasks]);
+  const [heroTime, setHeroTime] = useState("");
 
   const visible = useMemo(() => {
     let list = tasks;
-    if (selectedDate) {
+    if (dateFilter) {
+      list = list.filter((t) => t.date === dateFilter);
+    } else if (selectedDate) {
       // When a date is selected, filter to that day. Click again to clear.
       list = list.filter((t) => isSameDay(parseISO(t.date), selectedDate));
     }
@@ -110,7 +200,7 @@ const Index = () => {
       );
     }
     return sortTasks(list, sort);
-  }, [tasks, sort, query, selectedDate]);
+  }, [tasks, sort, query, selectedDate, dateFilter]);
 
   const stats = useMemo(() => {
     const todayTasks = tasks.filter((t) => isToday(parseISO(t.date)));
@@ -191,6 +281,12 @@ const Index = () => {
   };
 
   const openDraftTask = (draft: Omit<Task, "id" | "createdAt">) => {
+    const normalizedTags = inferTaskTags({
+      title: draft.title,
+      description: draft.description,
+      location: draft.location,
+      tags: Array.isArray(draft.tags) ? draft.tags : [],
+    });
     setEditing({
       title: draft.title,
       description: draft.description,
@@ -199,7 +295,7 @@ const Index = () => {
       duration: draft.duration,
       location: draft.location,
       priority: draft.priority || "medium",
-      tags: Array.isArray(draft.tags) ? draft.tags : [],
+      tags: normalizedTags,
       completed: !!draft.completed,
     });
     setDialogOpen(true);
@@ -246,12 +342,24 @@ const Index = () => {
         }
       }
 
-      await replaceAll(optimizeSchedule(baseTasks));
-      toast.success("Schedule optimized", {
-        description: "Tasks were improved and prioritized, then grouped by location and time.",
-      });
+      const optimized = optimizeSchedule(baseTasks);
+      setOptimizeRemovedCount(Math.max(0, baseTasks.length - optimized.length));
+      setOptimizePreviewTasks(optimized);
+      setOptimizePreviewOpen(true);
     } catch {
       toast.error("Could not optimize schedule right now.");
+    }
+  };
+
+  const handleConfirmOptimize = async () => {
+    try {
+      await replaceAll(optimizePreviewTasks);
+      toast.success("Schedule optimized", {
+        description: "Duplicates removed and tasks reorganized for a more efficient flow.",
+      });
+      setOptimizePreviewOpen(false);
+    } catch {
+      toast.error("Could not apply optimized schedule.");
     }
   };
 
@@ -355,10 +463,10 @@ const Index = () => {
     }
   };
 
-  const handleConfirmPlan = async () => {
-    if (!planAction || !planAction.tasks) return;
+  const handleConfirmPlan = async (tasksToSave: Omit<Task, "id" | "createdAt">[]) => {
+    if (!tasksToSave || tasksToSave.length === 0) return;
     try {
-      for (const task of planAction.tasks) {
+      for (const task of tasksToSave) {
         await addTask({
           title: task.title || "New Task",
           description: task.description || undefined,
@@ -371,7 +479,7 @@ const Index = () => {
           completed: !!task.completed,
         });
       }
-      toast.success(`Successfully saved ${planAction.tasks.length} tasks!`);
+      toast.success(`Successfully saved ${tasksToSave.length} tasks!`);
       setPlanAction(null);
     } catch (error) {
       toast.error("Failed to save some tasks.");
@@ -448,6 +556,63 @@ const Index = () => {
     }
   };
 
+  const loadTaskHistory = async () => {
+    setTaskHistoryLoading(true);
+    try {
+      if (!API_BASE) {
+        setTaskHistory([]);
+        return;
+      }
+      const token = localStorage.getItem("authToken");
+      const response = await fetch(`${API_BASE}/api/tasks/history`, {
+        method: "GET",
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      if (!response.ok) throw new Error("Could not load task history");
+      const data = await response.json() as { history?: TaskHistoryItem[] };
+      setTaskHistory(Array.isArray(data.history) ? data.history : []);
+    } catch {
+      setTaskHistory([]);
+      toast.error("Could not load task history.");
+    } finally {
+      setTaskHistoryLoading(false);
+    }
+  };
+
+  const loadRoutineProfiles = async () => {
+    setRoutineProfilesLoading(true);
+    try {
+      if (!API_BASE) {
+        setRoutineProfiles([]);
+        return;
+      }
+      const token = localStorage.getItem("authToken");
+      const response = await fetch(`${API_BASE}/api/chat/routine-profiles`, {
+        method: "GET",
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      if (!response.ok) throw new Error("Could not load routine profiles");
+      const data = await response.json() as { profiles?: RoutineProfileItem[] };
+      setRoutineProfiles(Array.isArray(data.profiles) ? data.profiles : []);
+    } catch {
+      setRoutineProfiles([]);
+      toast.error("Could not load saved routines.");
+    } finally {
+      setRoutineProfilesLoading(false);
+    }
+  };
+
+  const handleUseRoutineProfile = (profile: RoutineProfileItem) => {
+    localStorage.setItem("taiskmaster.routine.prefill", JSON.stringify(profile.questionnaire || {}));
+    setRoutineProfilesOpen(false);
+    toast.success("Routine loaded. You can adjust details before generating.");
+    navigate("/smart-routine");
+  };
+
   useEffect(() => {
     setRecommendations((current) => current.filter((recommendation) => {
       const suggestedTitle = recommendation.suggested_task?.title?.toLowerCase();
@@ -464,6 +629,20 @@ const Index = () => {
     return () => window.clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const formatter = new Intl.DateTimeFormat(undefined, {
+      weekday: "short",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    const sync = () => setHeroTime(formatter.format(new Date()));
+    sync();
+    const interval = window.setInterval(sync, 30_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
   return (
     <div className="min-h-screen bg-gradient-subtle">
       <Header
@@ -476,6 +655,14 @@ const Index = () => {
           setActivityScoresOpen(true);
           loadActivityScores();
         }}
+        onShowTaskHistory={() => {
+          setTaskHistoryOpen(true);
+          void loadTaskHistory();
+        }}
+        onShowRoutineProfiles={() => {
+          setRoutineProfilesOpen(true);
+          void loadRoutineProfiles();
+        }}
       />
 
       {/* Hero */}
@@ -485,6 +672,9 @@ const Index = () => {
           <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px] lg:items-start">
             <div>
               <div className="max-w-2xl animate-slide-up">
+                <div className="mb-2 text-xs font-medium text-muted-foreground">
+                  Taiskmaster {heroTime ? `· ${heroTime}` : ""}
+                </div>
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="mb-2 text-sm font-medium text-primary">Good to see you</p>
@@ -497,13 +687,23 @@ const Index = () => {
                         : "No tasks scheduled today. A perfect time to plan ahead."}
                     </p>
                   </div>
-                  <div className="h-20 w-20 shrink-0 rounded-lg border border-border bg-card p-2 text-center shadow-xs">
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Avg score</p>
-                    <p className="mt-1 text-xl font-semibold leading-none">
-                      {avgScoreLoading ? "..." : averageActivityScore ?? "--"}
-                    </p>
-                    <p className="mt-1 text-[10px] text-muted-foreground">/100</p>
-                  </div>
+                  <TooltipProvider delayDuration={120}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div className="h-20 w-20 shrink-0 self-start rounded-lg border border-border bg-card p-2 text-center shadow-xs">
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Act score</p>
+                          <p className="mt-1 text-xl font-semibold leading-none">
+                            {avgScoreLoading ? "..." : averageActivityScore ?? "--"}
+                          </p>
+                          <p className="mt-1 text-[10px] text-muted-foreground">/100</p>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent side="left" className="max-w-[260px] text-xs leading-relaxed">
+                        Based on your daily activity mix, workload spread, and break balance.
+                        Higher is better: 80-100 balanced, 60-79 acceptable, below 60 needs adjustments.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
                 </div>
               </div>
 
@@ -537,6 +737,18 @@ const Index = () => {
             />
           </div>
 
+          <Input
+            type="date"
+            value={dateFilter}
+            onChange={(e) => {
+              setDateFilter(e.target.value);
+              if (e.target.value) setSelectedDate(undefined);
+            }}
+            className="h-10 w-[175px]"
+            aria-label="Filter by date"
+            title="Filter by date"
+          />
+
           <Select value={sort} onValueChange={(v) => setSort(v as SortMode)}>
             <SelectTrigger className="h-10 w-[170px]">
               <ArrowDownUp className="h-4 w-4 text-muted-foreground" />
@@ -549,8 +761,11 @@ const Index = () => {
             </SelectContent>
           </Select>
 
-          {selectedDate && (
-            <Button variant="ghost" size="sm" onClick={() => setSelectedDate(undefined)}>
+          {(selectedDate || dateFilter) && (
+            <Button variant="ghost" size="sm" onClick={() => {
+              setSelectedDate(undefined);
+              setDateFilter("");
+            }}>
               Clear date filter
             </Button>
           )}
@@ -641,7 +856,7 @@ const Index = () => {
                 <div key={score.id} className="rounded-lg border border-border bg-card p-3">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-sm font-semibold">Score {score.health_score}/100</p>
-                    <p className="text-xs text-muted-foreground">{new Date(score.created_at).toLocaleString()}</p>
+                    <p className="text-xs text-muted-foreground">{new Date(score.created_at).toLocaleDateString()}</p>
                   </div>
                   <p className="mt-1 text-sm text-muted-foreground">{score.summary}</p>
                 </div>
@@ -664,6 +879,142 @@ const Index = () => {
             onDismiss={handleDismissRecommendations}
             onAdd={handleAddRecommendation}
           />
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={optimizePreviewOpen} onOpenChange={setOptimizePreviewOpen}>
+        <DialogContent className="sm:max-w-[760px]">
+          <DialogHeader>
+            <DialogTitle>Optimize Preview</DialogTitle>
+            <DialogDescription>
+              Review the optimized schedule before saving.
+              {optimizeRemovedCount > 0 ? ` ${optimizeRemovedCount} duplicate task${optimizeRemovedCount === 1 ? "" : "s"} will be removed.` : ""}
+            </DialogDescription>
+          </DialogHeader>
+          {optimizeConflicts.length > 0 && (
+            <div className="rounded-lg border border-amber-400/40 bg-amber-500/10 p-3 text-sm">
+              <p className="font-semibold text-amber-700">Detected conflict{optimizeConflicts.length === 1 ? "" : "s"}:</p>
+              <div className="mt-2 space-y-1 text-amber-800">
+                {optimizeConflicts.slice(0, 4).map((conflict, idx) => (
+                  <p key={`${conflict.firstTaskTitle}-${conflict.secondTaskTitle}-${idx}`}>
+                    "{conflict.firstTaskTitle}" collides with "{conflict.secondTaskTitle}" on {conflict.date}. Example fix:
+                    move "{conflict.secondTaskTitle}" to {conflict.suggestionDate} at {conflict.suggestionTime}.
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+            {optimizePreviewTasks.map((task, idx) => (
+              <div key={task.id} className="rounded-lg border border-border bg-card p-3">
+                <div className="grid gap-2 md:grid-cols-[minmax(0,2fr)_130px_110px_90px_40px]">
+                  {(() => {
+                    const locked = isLockedOptimizeTask(task);
+                    return (
+                      <>
+                  <Input
+                    value={task.title}
+                    disabled={locked}
+                    onChange={(e) => setOptimizePreviewTasks((current) => current.map((item, i) => i === idx ? { ...item, title: e.target.value } : item))}
+                  />
+                  <Input
+                    type="date"
+                    value={task.date}
+                    disabled={locked}
+                    onChange={(e) => setOptimizePreviewTasks((current) => current.map((item, i) => i === idx ? { ...item, date: e.target.value } : item))}
+                  />
+                  <Input
+                    type="time"
+                    value={task.time || ""}
+                    disabled={locked}
+                    onChange={(e) => setOptimizePreviewTasks((current) => current.map((item, i) => i === idx ? { ...item, time: e.target.value || undefined } : item))}
+                  />
+                  <Input
+                    type="number"
+                    min={15}
+                    value={task.duration || 60}
+                    disabled={locked}
+                    onChange={(e) => setOptimizePreviewTasks((current) => current.map((item, i) => i === idx ? { ...item, duration: Number(e.target.value || 60) } : item))}
+                  />
+                  <Button variant="ghost" size="icon-sm" disabled={locked} onClick={() => setOptimizePreviewTasks((current) => current.filter((_, i) => i !== idx))}>
+                    <X className="h-3.5 w-3.5" />
+                  </Button>
+                      </>
+                    );
+                  })()}
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {task.priority}{task.location ? ` · ${task.location}` : ""}{isLockedOptimizeTask(task) ? " · locked" : ""}
+                </p>
+              </div>
+            ))}
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setOptimizePreviewOpen(false)}>Cancel</Button>
+            <Button variant="hero" onClick={handleConfirmOptimize}>Save Optimized Plan</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={taskHistoryOpen} onOpenChange={setTaskHistoryOpen}>
+        <DialogContent className="sm:max-w-[760px]">
+          <DialogHeader>
+            <DialogTitle>Task history</DialogTitle>
+            <DialogDescription>All task creation, update, and deletion events.</DialogDescription>
+          </DialogHeader>
+          {taskHistoryLoading ? (
+            <p className="text-sm text-muted-foreground">Loading task history...</p>
+          ) : taskHistory.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No task history yet.</p>
+          ) : (
+            <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+              {taskHistory.map((item) => (
+                <div key={item.id} className="rounded-lg border border-border bg-card p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-semibold">{item.title}</p>
+                    <p className="text-xs text-muted-foreground">{new Date(item.created_at).toLocaleString()}</p>
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground capitalize">
+                    {item.action}
+                    {item.snapshot?.date ? ` · ${item.snapshot.date}` : ""}
+                    {item.snapshot?.time ? ` · ${item.snapshot.time}` : ""}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={routineProfilesOpen} onOpenChange={setRoutineProfilesOpen}>
+        <DialogContent className="sm:max-w-[760px]">
+          <DialogHeader>
+            <DialogTitle>Routines</DialogTitle>
+            <DialogDescription>Saved routine plans. Reuse one to prefill Smart Routine.</DialogDescription>
+          </DialogHeader>
+          {routineProfilesLoading ? (
+            <p className="text-sm text-muted-foreground">Loading routines...</p>
+          ) : routineProfiles.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No saved routines yet.</p>
+          ) : (
+            <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+              {routineProfiles.map((profile) => (
+                <div key={profile.id} className="rounded-lg border border-border bg-card p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold">{profile.name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        Until {profile.end_date} · Saved {new Date(profile.created_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={() => handleUseRoutineProfile(profile)}>
+                      Use for new routine
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 
