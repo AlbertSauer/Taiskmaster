@@ -16,6 +16,7 @@ interface AuthContextType {
   login: (username: string, password: string) => Promise<void>;
   register: (email: string, username: string, password: string, fullName?: string) => Promise<void>;
   updateProfile: (updates: { email?: string; username?: string; full_name?: string; password?: string }) => Promise<void>;
+  deleteAccount: () => Promise<void>;
   logout: () => void;
   isAuthenticated: boolean;
 }
@@ -162,6 +163,28 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const deleteAccount = async () => {
+    const authToken = token || localStorage.getItem("authToken");
+    if (!authToken) throw new Error("Not authenticated");
+
+    const response = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/me`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+      },
+    });
+
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(data?.detail || "Could not delete account");
+    }
+
+    // Clear auth state
+    setUser(null);
+    setToken(null);
+    localStorage.removeItem("authToken");
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -171,6 +194,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         login,
         register,
         updateProfile,
+        deleteAccount,
         logout,
         isAuthenticated: !!token && !!user,
       }}

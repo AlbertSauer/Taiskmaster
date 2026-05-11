@@ -197,3 +197,27 @@ def update_current_user():
             "created_at": user.created_at.isoformat(),
         }
     }), 200
+
+
+@auth_bp.delete('/me')
+@token_required
+def delete_account():
+    """Delete the current user account and all their data."""
+    from app.models import Task, TaskHistory, ActivityScore, RoutineProfile, AIUsage, Message
+    
+    user = request.current_user
+    User, db, _, _, _, _ = get_models()
+
+    # Delete all user-related data
+    db.session.query(Task).filter(Task.user_id == user.id).delete()
+    db.session.query(TaskHistory).filter(TaskHistory.user_id == user.id).delete()
+    db.session.query(ActivityScore).filter(ActivityScore.user_id == user.id).delete()
+    db.session.query(RoutineProfile).filter(RoutineProfile.user_id == user.id).delete()
+    db.session.query(AIUsage).filter(AIUsage.user_id == user.id).delete()
+    db.session.query(Message).filter(Message.user_id == user.id).delete()
+
+    # Delete the user account
+    db.session.delete(user)
+    db.session.commit()
+
+    return jsonify({"detail": "Account deleted successfully"}), 200

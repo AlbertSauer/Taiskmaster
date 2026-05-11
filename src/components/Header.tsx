@@ -25,13 +25,14 @@ interface Props {
   onNewTask?: () => void;
   onImportCalendar?: () => void;
   onDeleteCalendar?: () => void | Promise<void>;
+  onDeleteAccount?: () => void | Promise<void>;
   onShowActivityScores?: () => void;
   onShowTaskHistory?: () => void;
   onShowRoutineProfiles?: () => void;
   showActions?: boolean;
 }
 
-export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalendar, onShowActivityScores, onShowTaskHistory, onShowRoutineProfiles, showActions = true }: Props) => {
+export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalendar, onDeleteAccount, onShowActivityScores, onShowTaskHistory, onShowRoutineProfiles, showActions = true }: Props) => {
   const { pathname } = useLocation();
   const { theme, resolvedTheme, setTheme } = useTheme();
   const { logout, user, updateProfile } = useAuth();
@@ -71,6 +72,17 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
     const confirmed = window.confirm("Delete your complete calendar? This removes every task and cannot be undone.");
     if (!confirmed) return;
     await onDeleteCalendar();
+  };
+
+  const handleDeleteAccount = async () => {
+    if (!onDeleteAccount) return;
+    const confirmed = window.confirm(
+      "Delete your account? This will permanently remove your account and all associated data (tasks, routines, messages, etc.). This action cannot be undone."
+    );
+    if (!confirmed) return;
+    const doubleConfirm = window.confirm("Are you absolutely sure? Type 'DELETE' to confirm.");
+    if (!doubleConfirm) return;
+    await onDeleteAccount();
   };
 
   const handleOpenProfile = () => {
@@ -338,6 +350,16 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
                 >
                   <Trash2 className="h-4 w-4" />
                   Delete calendar
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="justify-start text-destructive hover:text-destructive"
+                  onClick={() => runProfileAction(handleDeleteAccount)}
+                  disabled={!onDeleteAccount}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete account
                 </Button>
               </div>
             </div>

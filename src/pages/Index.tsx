@@ -103,7 +103,7 @@ const isLockedOptimizeTask = (task: Task) => {
 
 const Index = () => {
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, deleteAccount } = useAuth();
   const { tasks, addTask, updateTask, deleteTask, deleteCalendar, replaceAll, toggleComplete } = useTasks();
   const [sort, setSort] = useState<SortMode>("datetime");
   const [query, setQuery] = useState("");
@@ -375,6 +375,16 @@ const Index = () => {
       toast.success("Calendar deleted");
     } catch {
       toast.error("Could not delete the calendar.");
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    try {
+      await deleteAccount();
+      navigate("/login");
+      toast.success("Account deleted successfully");
+    } catch {
+      toast.error("Could not delete the account.");
     }
   };
 
@@ -654,6 +664,7 @@ const Index = () => {
         onNewTask={handleNew}
         onImportCalendar={() => setImportOpen(true)}
         onDeleteCalendar={handleDeleteCalendar}
+        onDeleteAccount={handleDeleteAccount}
         onShowActivityScores={() => {
           setActivityScoresOpen(true);
           loadActivityScores();
