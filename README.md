@@ -17,6 +17,9 @@ Taiskmaster is a React + Vite + TypeScript + Tailwind frontend with a Flask back
 - Smart assistant + recommendations:
   - AI/logic-assisted create/update/delete/recurring plans,
   - preview-before-save flows.
+  - manager-style commands for opening profile/options, histories, routines, calendar import, and smart pages,
+  - calendar Q&A for day agendas, workload summaries, overdue/open/completed counts, and free-time checks,
+  - weather forecast answers by city or browser location using Open-Meteo.
 - Smart Routine:
   - work + personal routine questionnaire,
   - preview and edit before save,
@@ -31,6 +34,12 @@ Taiskmaster is a React + Vite + TypeScript + Tailwind frontend with a Flask back
   - routine generation enforces work coverage for selected workdays,
   - work segments split around breaks (e.g. `09:00-12:00`, break, `12:30-17:00`),
   - optimize cannot move locked `Work Hours` / `Work Break` entries.
+- Smart schedule optimization:
+  - intelligently reschedules future and today's tasks to minimize travel time,
+  - preserves all past tasks and their original scheduling,
+  - groups tasks by location and optimizes within each group,
+  - prioritizes high-priority tasks in the morning,
+  - detects and warns about potential time conflicts.
 - Activity insights:
   - score out of `100`,
   - daily retention keeps only newest score per day,

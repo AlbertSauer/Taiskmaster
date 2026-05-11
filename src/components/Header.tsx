@@ -83,6 +83,20 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
     setProfileOpen(true);
   };
 
+  useEffect(() => {
+    const openProfile = () => {
+      setProfileForm({
+        email: user?.email || "",
+        username: user?.username || "",
+        full_name: user?.full_name || "",
+        password: "",
+      });
+      setProfileOpen(true);
+    };
+    window.addEventListener("taiskmaster:open-profile", openProfile);
+    return () => window.removeEventListener("taiskmaster:open-profile", openProfile);
+  }, [user?.email, user?.full_name, user?.username]);
+
   const handleSaveProfile = async () => {
     if (!user) return;
     try {

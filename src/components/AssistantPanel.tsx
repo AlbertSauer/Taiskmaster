@@ -51,6 +51,16 @@ interface AssistantResult {
   actions?: AssistantAction[];
 }
 
+interface AssistantManagerControls {
+  onOpenActivityScores?: () => void;
+  onOpenTaskHistory?: () => void;
+  onOpenRoutineProfiles?: () => void;
+  onOpenImportCalendar?: () => void;
+  onOpenStatistics?: () => void;
+  onOpenSmartRoutine?: () => void;
+  onOpenSmartVacation?: () => void;
+}
+
 interface PendingProposal {
   actions: AssistantAction[];
   summary: string;
@@ -92,7 +102,7 @@ const greeting: Message = {
   id: "intro",
   role: "assistant",
   content:
-    "Hi, I'm your scheduling coach. I’ll help you plan clearly, stay motivated, and keep your day feeling manageable.\n• \"What's on for today?\"\n• \"Add: Call dentist tomorrow at 3pm\"\n• \"Optimize my schedule\"",
+    "Hi, I'm your scheduling coach and app manager. I can plan tasks, explain your calendar, open app areas, and check forecasts.\n• \"What's on for today?\"\n• \"Open task history\"\n• \"How is the weather in Berlin tomorrow?\"",
 };
 
 const chatStorageKey = (userId?: string) =>
@@ -152,6 +162,44 @@ const parseRelativeDate = (text: string) => {
   }
 
   return formatLocalDate(date);
+};
+
+const parseDateReference = (text: string) => {
+  const lowered = text.toLowerCase();
+  const isoMatch = lowered.match(/\b\d{4}-\d{2}-\d{2}\b/);
+  if (isoMatch) return isoMatch[0];
+
+  const date = new Date();
+  const inDaysMatch = lowered.match(/\bin\s+(\d+)\s+days?\b/);
+  if (inDaysMatch) {
+    date.setDate(date.getDate() + Number(inDaysMatch[1]));
+    return formatLocalDate(date);
+  }
+  if (/\btomorrow\b/.test(lowered)) {
+    date.setDate(date.getDate() + 1);
+    return formatLocalDate(date);
+  }
+  if (/\btoday\b/.test(lowered)) return formatLocalDate(date);
+
+  const weekdayMatch = lowered.match(/\b(next\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/);
+  if (weekdayMatch) {
+    const target = weekdayLookup[weekdayMatch[2]];
+    let delta = (target - date.getDay() + 7) % 7;
+    if (delta === 0 || weekdayMatch[1]) delta += 7;
+    date.setDate(date.getDate() + delta);
+    return formatLocalDate(date);
+  }
+
+  return formatLocalDate(date);
+};
+
+const formatCalendarTask = (task: Task) =>
+  `• ${task.time ? `${task.time} — ` : ""}${task.title}${task.location ? ` (${task.location})` : ""}`;
+
+const dateLabel = (date: string) => {
+  const parsed = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return date;
+  return parsed.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
 };
 
 const weekdayLookup: Record<string, number> = {
@@ -518,15 +566,211 @@ const runLocalFallbackAssistant = async (
   return { reply: "I’m not fully sure what you want to change yet. Tell me the task or plan, plus the day, time, or place if you know them, and I’ll sort it out with you." };
 };
 
+const weatherCodeLabel = (code: number) => {
+  if (code === 0) return "clear sky";
+  if ([1, 2, 3].includes(code)) return "partly cloudy";
+  if ([45, 48].includes(code)) return "foggy";
+  if ([51, 53, 55, 56, 57].includes(code)) return "drizzle";
+  if ([61, 63, 65, 66, 67].includes(code)) return "rainy";
+  if ([71, 73, 75, 77].includes(code)) return "snowy";
+  if ([80, 81, 82].includes(code)) return "rain showers";
+  if ([85, 86].includes(code)) return "snow showers";
+  if ([95, 96, 99].includes(code)) return "thunderstorms";
+  return "mixed conditions";
+};
+
+const extractWeatherLocation = (input: string) => {
+  const match = input.match(/\b(?:in|for|at)\s+([a-zA-ZäöüÄÖÜß\s.-]+?)(?:\s+(?:today|tomorrow|on|next|in\s+\d+\s+days?)|[?.!,]|$)/i);
+  return match?.[1]?.trim();
+};
+
+const getBrowserPosition = () =>
+  new Promise<GeolocationPosition>((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error("Geolocation is not supported."));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 8000 });
+  });
+
+const fetchWeatherSummary = async (input: string) => {
+  const targetDate = parseDateReference(input);
+  const today = new Date();
+  const target = new Date(`${targetDate}T00:00:00`);
+  const daysAhead = Math.ceil((target.getTime() - new Date(formatLocalDate(today)).getTime()) / 86_400_000);
+  if (daysAhead < 0 || daysAhead > 15) {
+    return "I can check forecasts up to 16 days ahead. For older or farther dates, weather data is outside the forecast window.";
+  }
+
+  let latitude: number;
+  let longitude: number;
+  let placeLabel = "your location";
+  const location = extractWeatherLocation(input);
+
+  if (location) {
+    const geocodeUrl = new URL("https://geocoding-api.open-meteo.com/v1/search");
+    geocodeUrl.searchParams.set("name", location);
+    geocodeUrl.searchParams.set("count", "1");
+    geocodeUrl.searchParams.set("language", "en");
+    geocodeUrl.searchParams.set("format", "json");
+    const geocodeResponse = await fetch(geocodeUrl.toString());
+    if (!geocodeResponse.ok) throw new Error("Could not find that location.");
+    const geocode = await geocodeResponse.json() as { results?: Array<{ name: string; country?: string; latitude: number; longitude: number }> };
+    const result = geocode.results?.[0];
+    if (!result) return `I couldn't find weather coordinates for "${location}". Try a city name like "Berlin" or "New York".`;
+    latitude = result.latitude;
+    longitude = result.longitude;
+    placeLabel = `${result.name}${result.country ? `, ${result.country}` : ""}`;
+  } else {
+    try {
+      const position = await getBrowserPosition();
+      latitude = position.coords.latitude;
+      longitude = position.coords.longitude;
+    } catch {
+      return "Tell me a city for the forecast, for example: \"How is the weather in Berlin tomorrow?\"";
+    }
+  }
+
+  const forecastUrl = new URL("https://api.open-meteo.com/v1/forecast");
+  forecastUrl.searchParams.set("latitude", String(latitude));
+  forecastUrl.searchParams.set("longitude", String(longitude));
+  forecastUrl.searchParams.set("daily", "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max");
+  forecastUrl.searchParams.set("timezone", "auto");
+  forecastUrl.searchParams.set("forecast_days", "16");
+  const response = await fetch(forecastUrl.toString());
+  if (!response.ok) throw new Error("Weather service unavailable.");
+  const data = await response.json() as {
+    daily?: {
+      time?: string[];
+      weather_code?: number[];
+      temperature_2m_max?: number[];
+      temperature_2m_min?: number[];
+      precipitation_probability_max?: number[];
+      precipitation_sum?: number[];
+      wind_speed_10m_max?: number[];
+    };
+  };
+  const index = data.daily?.time?.indexOf(targetDate) ?? -1;
+  if (index < 0) return `I could not find a forecast for ${targetDate}.`;
+
+  const code = data.daily?.weather_code?.[index] ?? -1;
+  const high = data.daily?.temperature_2m_max?.[index];
+  const low = data.daily?.temperature_2m_min?.[index];
+  const rainChance = data.daily?.precipitation_probability_max?.[index];
+  const rain = data.daily?.precipitation_sum?.[index];
+  const wind = data.daily?.wind_speed_10m_max?.[index];
+
+  return `Forecast for ${placeLabel} on ${dateLabel(targetDate)}: ${weatherCodeLabel(code)}, ${Math.round(low ?? 0)}-${Math.round(high ?? 0)}°C, ${rainChance ?? 0}% precipitation chance, ${rain ?? 0} mm precipitation, wind up to ${Math.round(wind ?? 0)} km/h.`;
+};
+
+const buildCalendarManagerReply = (input: string, tasks: Task[]) => {
+  const lowered = input.toLowerCase();
+  const targetDate = parseDateReference(input);
+  const openTasks = tasks.filter((task) => !task.completed);
+  const completedTasks = tasks.filter((task) => task.completed);
+  const overdueTasks = openTasks.filter((task) => task.date < formatLocalDate(new Date()));
+
+  if (/\b(summary|overview|status|stats|statistics)\b/.test(lowered) && /\b(calendar|schedule|tasks?)\b/.test(lowered)) {
+    const activeDays = new Set(tasks.map((task) => task.date)).size;
+    const next = openTasks
+      .filter((task) => task.date >= formatLocalDate(new Date()))
+      .sort((a, b) => `${a.date}${a.time ?? ""}`.localeCompare(`${b.date}${b.time ?? ""}`))[0];
+    return [
+      `Calendar overview: ${tasks.length} total tasks, ${openTasks.length} open, ${completedTasks.length} completed, ${overdueTasks.length} overdue.`,
+      `You have tasks on ${activeDays} calendar day${activeDays === 1 ? "" : "s"}.`,
+      next ? `Next up: ${formatCalendarTask(next)} on ${dateLabel(next.date)}.` : "No upcoming open tasks found.",
+    ].join("\n");
+  }
+
+  if (/\b(free|available|availability|open slot|gap)\b/.test(lowered)) {
+    const dayTasks = openTasks
+      .filter((task) => task.date === targetDate)
+      .sort((a, b) => (a.time ?? "23:59").localeCompare(b.time ?? "23:59"));
+    if (!dayTasks.length) return `${dateLabel(targetDate)} looks open. Nothing is scheduled.`;
+    const timed = dayTasks.filter((task) => task.time);
+    const busyMinutes = dayTasks.reduce((sum, task) => sum + Math.max(15, task.duration ?? 60), 0);
+    return [
+      `${dateLabel(targetDate)} has ${dayTasks.length} task${dayTasks.length === 1 ? "" : "s"} and about ${(busyMinutes / 60).toFixed(1)}h planned.`,
+      timed.length ? `Timed tasks:\n${timed.map(formatCalendarTask).join("\n")}` : "No exact task times are set, so the day still has flexible space.",
+    ].join("\n");
+  }
+
+  const dayTasks = openTasks
+    .filter((task) => task.date === targetDate)
+    .sort((a, b) => (a.time ?? "23:59").localeCompare(b.time ?? "23:59"));
+  if (/\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|calendar|schedule|planned|agenda|what.*on)\b/.test(lowered)) {
+    if (!dayTasks.length) return `Nothing is scheduled for ${dateLabel(targetDate)}.`;
+    return `You have ${dayTasks.length} open task${dayTasks.length === 1 ? "" : "s"} on ${dateLabel(targetDate)}:\n${dayTasks.map(formatCalendarTask).join("\n")}`;
+  }
+
+  return null;
+};
+
+const runManagerIntent = async (
+  input: string,
+  ctx: ReturnType<typeof useTasks>,
+  controls: AssistantManagerControls,
+): Promise<AssistantResult | null> => {
+  const text = input.trim().toLowerCase();
+
+  if (/\b(open|show|go to|take me to)\b/.test(text)) {
+    if (/\b(options|settings|profile)\b/.test(text)) {
+      window.dispatchEvent(new Event("taiskmaster:open-profile"));
+      return { reply: "Opened your profile and options." };
+    }
+    if (/\b(activity scores?|act scores?)\b/.test(text)) {
+      controls.onOpenActivityScores?.();
+      return { reply: "Opened your activity score history." };
+    }
+    if (/\b(task history|history)\b/.test(text)) {
+      controls.onOpenTaskHistory?.();
+      return { reply: "Opened your task history." };
+    }
+    if (/\b(routines?|routine profiles?)\b/.test(text)) {
+      controls.onOpenRoutineProfiles?.();
+      return { reply: "Opened your saved routines." };
+    }
+    if (/\b(import|calendar import)\b/.test(text)) {
+      controls.onOpenImportCalendar?.();
+      return { reply: "Opened calendar import." };
+    }
+    if (/\b(statistics|stats|analytics)\b/.test(text)) {
+      controls.onOpenStatistics?.();
+      return { reply: "Opening Smart Statistics." };
+    }
+    if (/\b(smart routine|routine builder)\b/.test(text)) {
+      controls.onOpenSmartRoutine?.();
+      return { reply: "Opening Smart Routine." };
+    }
+    if (/\b(vacation|holiday|time off)\b/.test(text)) {
+      controls.onOpenSmartVacation?.();
+      return { reply: "Opening Smart Vacation." };
+    }
+  }
+
+  if (/\b(weather|forecast|rain|temperature|snow|sunny|wind)\b/.test(text)) {
+    return { reply: await fetchWeatherSummary(input) };
+  }
+
+  const calendarReply = buildCalendarManagerReply(input, ctx.tasks);
+  if (calendarReply) return { reply: calendarReply };
+
+  return null;
+};
+
 const runAssistant = async (
   input: string,
   ctx: ReturnType<typeof useTasks>,
   authToken: string | null,
   messages: Message[],
+  controls: AssistantManagerControls,
 ): Promise<AssistantResult> => {
   const { tasks } = ctx;
 
   if (!input.trim()) return { reply: "Tell me what you'd like to do." };
+
+  const managerResult = await runManagerIntent(input, ctx, controls);
+  if (managerResult) return managerResult;
 
   if (useLiveAssistant) {
     try {
@@ -616,7 +860,12 @@ const applyAssistantActions = async (
   }
 };
 
-export const AssistantPanel = ({ onProposedAction }: { onProposedAction?: (action: AssistantAction) => void }) => {
+export const AssistantPanel = ({
+  onProposedAction,
+  ...managerControls
+}: {
+  onProposedAction?: (action: AssistantAction) => void;
+} & AssistantManagerControls) => {
   const { token, user } = useAuth();
   const [open, setOpen] = useState(false);
   const [minimized, setMinimized] = useState(false);
@@ -772,7 +1021,7 @@ export const AssistantPanel = ({ onProposedAction }: { onProposedAction?: (actio
         ? `Revise this proposed plan based on the user's feedback.\nPrevious proposal:\n${pendingProposal.summary}\nUser feedback: ${trimmed}`
         : trimmed;
       const currentMessages = [...messages, userMsg];
-      const { reply: assistantText, actions } = await runAssistant(effectiveInput, taskCtx, token, currentMessages);
+      const { reply: assistantText, actions } = await runAssistant(effectiveInput, taskCtx, token, currentMessages, managerControls);
       const normalizedActions = normalizeAssistantActions(actions);
 
       if (normalizedActions.length) {

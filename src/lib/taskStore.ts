@@ -362,13 +362,20 @@ export const sortTasks = (tasks: Task[], mode: SortMode): Task[] => {
  *  2. Within each day, cluster tasks that share a location (cuts travel).
  *  3. Within a cluster, order by priority then time.
  *  4. High-priority items without time get pulled to the morning.
+ *  5. Only optimize future/today tasks; past tasks remain unchanged.
  */
 export const optimizeSchedule = (tasks: Task[]): Task[] => {
+  const today = formatLocalDate(new Date());
+
+  // Separate past tasks from future/today tasks
+  const pastTasks = tasks.filter((t) => t.date < today);
+  const futureAndTodayTasks = tasks.filter((t) => t.date >= today);
+
   const dedupeSignature = (task: Task) =>
     `${task.title.trim().toLowerCase()}|${task.date}|${(task.time ?? "").trim()}|${(task.location ?? "").trim().toLowerCase()}`;
 
   const seen = new Set<string>();
-  const uniqueTasks = tasks.filter((task) => {
+  const uniqueTasks = futureAndTodayTasks.filter((task) => {
     const key = dedupeSignature(task);
     if (seen.has(key)) return false;
     seen.add(key);
@@ -429,5 +436,7 @@ export const optimizeSchedule = (tasks: Task[]): Task[] => {
       cursor += 15; // travel buffer between locations
     }
   }
-  return result;
+
+  // Combine past tasks (unchanged) with optimized future tasks
+  return [...pastTasks, ...result];
 };

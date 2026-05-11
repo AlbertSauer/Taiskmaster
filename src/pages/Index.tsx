@@ -811,7 +811,25 @@ const Index = () => {
         onImport={handleImport}
       />
 
-      <AssistantPanel onProposedAction={handleProposedAction} />
+      <AssistantPanel
+        onProposedAction={handleProposedAction}
+        onOpenActivityScores={() => {
+          setActivityScoresOpen(true);
+          loadActivityScores();
+        }}
+        onOpenTaskHistory={() => {
+          setTaskHistoryOpen(true);
+          void loadTaskHistory();
+        }}
+        onOpenRoutineProfiles={() => {
+          setRoutineProfilesOpen(true);
+          void loadRoutineProfiles();
+        }}
+        onOpenImportCalendar={() => setImportOpen(true)}
+        onOpenStatistics={() => navigate("/smart-statistics")}
+        onOpenSmartRoutine={() => navigate("/smart-routine")}
+        onOpenSmartVacation={() => navigate("/smart-vacation")}
+      />
 
       <Dialog open={activityScoresOpen} onOpenChange={setActivityScoresOpen}>
         <DialogContent className="sm:max-w-[720px]">
@@ -996,14 +1014,11 @@ const Index = () => {
         size="icon"
         onClick={handleRecommend}
         disabled={loadingRecommendations}
-        className="group fixed bottom-6 left-6 z-40 h-14 w-14 overflow-hidden rounded-full transition-all duration-200 hover:w-44 focus-visible:w-44"
+        className="fixed bottom-6 left-6 z-40 h-14 w-14 rounded-full"
         aria-label={loadingRecommendations ? "Finding recommendations" : "Recommendations"}
         title={loadingRecommendations ? "Finding recommendations" : "Recommendations"}
       >
         <HeartHandshake className="h-4 w-4" />
-        <span className="ml-0 opacity-0 whitespace-nowrap transition-all duration-200 group-hover:ml-2 group-hover:opacity-100 group-focus-visible:ml-2 group-focus-visible:opacity-100">
-          {loadingRecommendations ? "Finding ideas..." : "Recommendations"}
-        </span>
       </Button>
     </div>
   );
