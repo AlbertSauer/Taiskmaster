@@ -21,6 +21,7 @@ class User(db.Model):
     activity_scores = db.relationship('ActivityScore', back_populates='user', cascade='all, delete-orphan')
     task_history = db.relationship('TaskHistory', back_populates='user', cascade='all, delete-orphan')
     routine_profiles = db.relationship('RoutineProfile', back_populates='user', cascade='all, delete-orphan')
+    ai_usage = db.relationship('AIUsage', back_populates='user', cascade='all, delete-orphan')
 
 
 class Task(db.Model):
@@ -107,3 +108,19 @@ class RoutineProfile(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
     user = db.relationship('User', back_populates='routine_profiles')
+
+
+class AIUsage(db.Model):
+    __tablename__ = "ai_usage"
+
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(db.String(36), db.ForeignKey("users.id"), nullable=False, index=True)
+    feature = db.Column(db.String(80), nullable=False, default="assistant")
+    model = db.Column(db.String(120), nullable=False)
+    prompt_tokens = db.Column(db.Integer, nullable=False, default=0)
+    completion_tokens = db.Column(db.Integer, nullable=False, default=0)
+    total_tokens = db.Column(db.Integer, nullable=False, default=0)
+    estimated_cost_usd = db.Column(db.Float, nullable=False, default=0.0)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    user = db.relationship('User', back_populates='ai_usage')

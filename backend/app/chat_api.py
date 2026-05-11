@@ -10,6 +10,7 @@ from openai import OpenAI
 
 from app.env import load_app_env
 from app.auth import token_required
+from app.ai_usage import ai_usage_summary, record_ai_usage
 
 load_app_env()
 
@@ -515,6 +516,68 @@ def _parse_recurring_tasks(text):
     }
 
 
+def _parse_vacation_range(text):
+    lowered = text.lower()
+    if not re.search(r"\b(vacation|holiday|time off|days off|out of office|ooo)\b", lowered):
+        return None
+
+    explicit_dates = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", text)
+    start_date = None
+    end_date = None
+    if len(explicit_dates) >= 2:
+        start_date, end_date = explicit_dates[0], explicit_dates[1]
+    else:
+        from_to_match = re.search(r"\bfrom\s+(.+?)\s+to\s+(.+?)(?:$|[.,;])", text, re.IGNORECASE)
+        if from_to_match:
+            start_date = _parse_date_reference(from_to_match.group(1))
+            end_date = _parse_date_reference(from_to_match.group(2))
+        else:
+            single_date = _parse_date_reference(text)
+            if single_date:
+                start_date = single_date
+                end_date = single_date
+
+    if not start_date or not end_date:
+        return {
+            "reply": "I can add your vacation, but I need a start and end date (for example: 2026-07-10 to 2026-07-18).",
+            "actions": [],
+        }
+
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except ValueError:
+        return {
+            "reply": "I can add your vacation, but those dates look invalid. Please use YYYY-MM-DD.",
+            "actions": [],
+        }
+
+    if end_dt < start_dt:
+        start_dt, end_dt = end_dt, start_dt
+
+    tasks = []
+    current = start_dt
+    while current <= end_dt and len(tasks) < 366:
+        date_str = current.strftime("%Y-%m-%d")
+        tasks.append({
+            "title": "Vacation",
+            "description": "Time off period saved from Smart Vacation.",
+            "date": date_str,
+            "time": None,
+            "duration": None,
+            "location": None,
+            "priority": "low",
+            "tags": ["vacation", "time-off", "locked"],
+            "completed": False,
+        })
+        current += timedelta(days=1)
+
+    return {
+        "reply": f'Added vacation from {start_dt.strftime("%Y-%m-%d")} to {end_dt.strftime("%Y-%m-%d")} and marked it in your calendar.',
+        "actions": [{"type": "create_tasks", "tasks": tasks}],
+    }
+
+
 def _parse_new_task(text):
     if not re.search(r"\b(add|create|new task|schedule|plan)\b", text, re.IGNORECASE):
         return None
@@ -718,6 +781,10 @@ def _rule_based_response(payload):
             "reply": "Nice work. I optimized your schedule and kept related locations together so the day should feel smoother.",
             "actions": [{"type": "optimize_schedule"}],
         }
+
+    vacation_tasks = _parse_vacation_range(text)
+    if vacation_tasks:
+        return vacation_tasks
 
     recurring_tasks = _parse_recurring_tasks(text)
     if recurring_tasks:
@@ -1388,6 +1455,22 @@ def _fit_and_dedupe_routine_tasks(generated_tasks, existing_tasks):
     return accepted
 
 
+def _extract_vacation_dates(tasks):
+    vacation_dates = set()
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        date_value = str(task.get("date") or "").strip()
+        if not date_value:
+            continue
+        title = str(task.get("title") or "").strip().lower()
+        tags = task.get("tags") if isinstance(task.get("tags"), list) else []
+        normalized_tags = {str(tag).strip().lower() for tag in tags}
+        if "vacation" in normalized_tags or "time-off" in normalized_tags or title == "vacation":
+            vacation_dates.add(date_value)
+    return vacation_dates
+
+
 def _ensure_work_blocks_for_all_workdays(current_tasks, questionnaire, end_date, existing_tasks):
     working_days = questionnaire.get("working_days") or ["monday", "tuesday", "wednesday", "thursday", "friday"]
     if not isinstance(working_days, list):
@@ -1563,6 +1646,7 @@ def chat():
             max_tokens=450,
             temperature=0.7,
         )
+        record_ai_usage(completion, "assistant")
         
         content = completion.choices[0].message.content or "{}"
         parsed = json.loads(content)
@@ -1660,7 +1744,7 @@ def recommendations():
 
     rng = Random(refresh_token or datetime.now().isoformat())
     rng.shuffle(filtered_pool)
-    recommendations = filtered_pool[:4]
+    recommendations = filtered_pool[:3]
 
     if not recommendations:
         recommendations = [{
@@ -1669,6 +1753,20 @@ def recommendations():
             "category": "schedule",
             "suggested_task": _make_task("Weekly planning review", 1, "schedule", priority="high", tasks=tasks, duration=30, preferred_time="08:30", date_override=target_date),
         }]
+    if len(recommendations) < 3:
+        existing_titles = {
+            str(item.get("title", "")).lower()
+            for item in recommendations
+            if isinstance(item, dict)
+        }
+        for candidate in base_pool:
+            candidate_title = str(candidate.get("title", "")).lower()
+            if candidate_title in existing_titles:
+                continue
+            recommendations.append(candidate)
+            existing_titles.add(candidate_title)
+            if len(recommendations) >= 3:
+                break
 
     api_key = os.getenv("OPENAI_API_KEY")
     if api_key:
@@ -1680,7 +1778,7 @@ def recommendations():
                 f"Excluded recommendation titles: {', '.join(sorted(excluded_titles)) or 'None'}.\n"
                 f"Refresh token: {refresh_token or 'none'}.\n"
                 f"Target date for recommendations: {target_date}.\n"
-                "Return JSON with a recommendations array of 4 fresh ideas. "
+                "Return JSON with a recommendations array of 3 fresh ideas. "
                 "Each item must include title, reason, category, and suggested_task. "
                 "Every suggested_task must include a compact description and one priority value from very-low, low, medium, high, urgent. "
                 "All suggested_task dates must be exactly the target date. "
@@ -1698,6 +1796,7 @@ def recommendations():
                 max_tokens=700,
                 temperature=1.0,
             )
+            record_ai_usage(completion, "recommendations")
             content = completion.choices[0].message.content or "{}"
             parsed = json.loads(content)
             model_recommendations = parsed.get("recommendations", [])
@@ -1710,17 +1809,17 @@ def recommendations():
                     recommendation for recommendation in normalized_model_recommendations if recommendation
                     if recommendation.get("title", "").lower() not in excluded_titles
                     and (recommendation.get("suggested_task", {}) or {}).get("title", "").lower() not in excluded_titles
-                ][:4] or recommendations
+                ][:3] or recommendations
         except Exception:
             pass
 
     recommendations = [
         _normalize_recommendation_item(recommendation, fallback_days=(idx % 4) + 1, tasks=tasks)
-        for idx, recommendation in enumerate(recommendations[:4])
+        for idx, recommendation in enumerate(recommendations[:3])
     ]
     recommendations = [recommendation for recommendation in recommendations if recommendation]
     recommendations = _pin_recommendations_to_date(recommendations, target_date)
-    recommendations = _fit_recommendation_times(recommendations[:4], tasks)
+    recommendations = _fit_recommendation_times(recommendations[:3], tasks)
     return jsonify({"recommendations": recommendations}), 200
 
 
@@ -1765,6 +1864,7 @@ def optimize_schedule_ai():
             max_tokens=1400,
             temperature=0.5,
         )
+        record_ai_usage(completion, "optimize-schedule")
 
         content = completion.choices[0].message.content or "{}"
         parsed = json.loads(content)
@@ -1819,6 +1919,7 @@ def activity_insights():
             max_tokens=350,
             temperature=0.4,
         )
+        record_ai_usage(completion, "activity-insights")
         content = completion.choices[0].message.content or "{}"
         parsed = json.loads(content)
         summary = str(parsed.get("summary") or "").strip()
@@ -1899,6 +2000,17 @@ def activity_scores():
     }), 200
 
 
+@chat_bp.get("/ai-usage")
+@token_required
+def ai_usage():
+    try:
+        days = int(request.args.get("days", 30))
+    except (TypeError, ValueError):
+        days = 30
+    days = max(1, min(days, 365))
+    return jsonify(ai_usage_summary(request.current_user.id, days)), 200
+
+
 @chat_bp.post("/routine-plan")
 @token_required
 def routine_plan():
@@ -1938,6 +2050,7 @@ def routine_plan():
                 max_tokens=2200,
                 temperature=0.5,
             )
+            record_ai_usage(completion, "routine-plan")
             content = completion.choices[0].message.content or "{}"
             parsed = json.loads(content)
             candidate_tasks = parsed.get("tasks", [])
@@ -1970,6 +2083,19 @@ def routine_plan():
     final_tasks = _ensure_work_blocks_for_all_workdays(final_tasks, questionnaire, end_date, existing_tasks)
     final_tasks = _enforce_routine_time_relations(final_tasks, questionnaire)
     final_tasks = _fit_and_dedupe_routine_tasks(final_tasks, existing_tasks)
+    vacation_dates = _extract_vacation_dates(existing_tasks)
+    removed_for_vacation = 0
+    if vacation_dates:
+        before_count = len(final_tasks)
+        final_tasks = [task for task in final_tasks if str(task.get("date") or "") not in vacation_dates]
+        removed_for_vacation = max(0, before_count - len(final_tasks))
+
+    response_message = None
+    if removed_for_vacation > 0:
+        response_message = (
+            f"{removed_for_vacation} routine task"
+            f"{'' if removed_for_vacation == 1 else 's'} were skipped because they fall in your vacation period."
+        )
     routine_profile_id = None
     try:
         from app.models import RoutineProfile, db
@@ -1985,7 +2111,7 @@ def routine_plan():
     except Exception:
         routine_profile_id = None
 
-    return jsonify({"tasks": final_tasks, "routine_profile_id": routine_profile_id}), 200
+    return jsonify({"tasks": final_tasks, "routine_profile_id": routine_profile_id, "message": response_message}), 200
 
 
 @chat_bp.get("/routine-profiles")

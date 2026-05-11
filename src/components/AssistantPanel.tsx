@@ -352,6 +352,46 @@ const parseRecurringTasks = (input: string): AssistantResult | null => {
   };
 };
 
+const parseVacationTasks = (input: string): AssistantResult | null => {
+  if (!/\b(vacation|holiday|time off|days off|out of office|ooo)\b/i.test(input)) return null;
+  const explicitDates = input.match(/\b\d{4}-\d{2}-\d{2}\b/g) ?? [];
+  if (explicitDates.length < 2) {
+    return {
+      reply: "I can add your vacation, but I need start and end date (example: 2026-07-10 to 2026-07-18).",
+      actions: [],
+    };
+  }
+  let start = new Date(`${explicitDates[0]}T00:00:00`);
+  let end = new Date(`${explicitDates[1]}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return { reply: "Those dates look invalid. Please use YYYY-MM-DD.", actions: [] };
+  }
+  if (end < start) {
+    const tmp = start;
+    start = end;
+    end = tmp;
+  }
+
+  const tasks: AssistantTaskPayload[] = [];
+  const cursor = new Date(start);
+  while (cursor <= end && tasks.length < 366) {
+    tasks.push({
+      title: "Vacation",
+      description: "Time off period saved from Smart Vacation.",
+      date: formatLocalDate(cursor),
+      priority: "low",
+      tags: ["vacation", "time-off", "locked"],
+      completed: false,
+    });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  return {
+    reply: `Added vacation from ${formatLocalDate(start)} to ${formatLocalDate(end)} and marked it in your calendar.`,
+    actions: [{ type: "create_tasks", tasks }],
+  };
+};
+
 const isConfirmationMessage = (text: string) =>
   /^(yes|yep|yeah|confirm(?:ed)?(?:\s+it|\s+that|\s+the\s+change|\s+the\s+changes)?|do it|apply(?:\s+it|\s+that|\s+the\s+change|\s+the\s+changes)?|go ahead|sounds good|looks good|ok|okay|please do|please apply)$/i.test(text.trim());
 
@@ -421,6 +461,9 @@ const runLocalFallbackAssistant = async (
 
   const recurringTasks = parseRecurringTasks(input);
   if (recurringTasks) return recurringTasks;
+
+  const vacationTasks = parseVacationTasks(input);
+  if (vacationTasks) return vacationTasks;
 
   if (/^(add|new task|create|schedule|plan)\b/i.test(input.trim())) {
     const cleaned = input.replace(/^(add|new task|create|schedule|plan)[:\s]+/i, "").trim();

@@ -1,4 +1,4 @@
-import { ListTodo, LogOut, Settings, Trash2, UserCircle2, CheckCircle2, BarChart3, UploadCloud, Sparkles, Palette, Sun, Moon, History, Repeat } from "lucide-react";
+import { ListTodo, LogOut, Settings, Trash2, UserCircle2, BarChart3, UploadCloud, Sparkles, Palette, Sun, Moon, History, Repeat } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTheme } from "next-themes";
 import { Button } from "@/components/ui/button";
@@ -25,14 +25,13 @@ interface Props {
   onNewTask?: () => void;
   onImportCalendar?: () => void;
   onDeleteCalendar?: () => void | Promise<void>;
-  onShowCompletedTasks?: () => void;
   onShowActivityScores?: () => void;
   onShowTaskHistory?: () => void;
   onShowRoutineProfiles?: () => void;
   showActions?: boolean;
 }
 
-export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalendar, onShowCompletedTasks, onShowActivityScores, onShowTaskHistory, onShowRoutineProfiles, showActions = true }: Props) => {
+export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalendar, onShowActivityScores, onShowTaskHistory, onShowRoutineProfiles, showActions = true }: Props) => {
   const { pathname } = useLocation();
   const { theme, resolvedTheme, setTheme } = useTheme();
   const { logout, user, updateProfile } = useAuth();
@@ -110,6 +109,12 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
     root.classList.remove("style-blue", "style-green", "style-pink", "style-red", "style-grey");
     root.classList.add(`style-${style}`);
   };
+  const runProfileAction = (action?: () => void) => {
+    if (!action) return;
+    setProfileOpen(false);
+    action();
+  };
+
   const currentTheme = theme === "system" ? resolvedTheme : theme;
   const isDark = currentTheme === "dark";
 
@@ -178,23 +183,22 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
                   <UserCircle2 className="mr-2 h-4 w-4" />
                   Profile
                 </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel>Interface</DropdownMenuLabel>
+                <DropdownMenuItem
+                  onSelect={() => setTheme(isDark ? "light" : "dark")}
+                  disabled={!mounted}
+                  aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
+                >
+                  {mounted && (isDark ? <Sun className="mr-2 h-4 w-4" /> : <Moon className="mr-2 h-4 w-4" />)}
+                  {!mounted ? "Theme mode" : isDark ? "Light mode" : "Dark mode"}
+                </DropdownMenuItem>
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger>
                     <Palette className="mr-2 h-4 w-4" />
-                    Interface
+                    Colors
                   </DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent className="w-52">
-                    <DropdownMenuLabel>Theme mode</DropdownMenuLabel>
-                    <DropdownMenuItem
-                      onSelect={() => setTheme(isDark ? "light" : "dark")}
-                      disabled={!mounted}
-                      aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
-                    >
-                      {mounted && (isDark ? <Sun className="mr-2 h-4 w-4" /> : <Moon className="mr-2 h-4 w-4" />)}
-                      {!mounted ? "Theme mode" : isDark ? "Light mode" : "Dark mode"}
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel>Color style</DropdownMenuLabel>
+                  <DropdownMenuSubContent sideOffset={6} alignOffset={-4} className="w-44">
                     <DropdownMenuItem onSelect={() => applyStyle("blue")} aria-label="Blue style">
                       <Palette className="mr-2 h-4 w-4" />
                       Blue {styleMode === "blue" ? "✓" : ""}
@@ -217,34 +221,6 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
                     </DropdownMenuItem>
                   </DropdownMenuSubContent>
                 </DropdownMenuSub>
-                <DropdownMenuItem onSelect={onShowCompletedTasks} disabled={!onShowCompletedTasks}>
-                  <CheckCircle2 className="mr-2 h-4 w-4" />
-                  Done tasks
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={onShowActivityScores} disabled={!onShowActivityScores}>
-                  <BarChart3 className="mr-2 h-4 w-4" />
-                  Activity Scores
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={onShowTaskHistory} disabled={!onShowTaskHistory}>
-                  <History className="mr-2 h-4 w-4" />
-                  Task history
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={onShowRoutineProfiles} disabled={!onShowRoutineProfiles}>
-                  <Repeat className="mr-2 h-4 w-4" />
-                  Routines
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={onImportCalendar} disabled={!onImportCalendar}>
-                  <UploadCloud className="mr-2 h-4 w-4" />
-                  Import calendar
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={handleDeleteCalendar}
-                  disabled={!onDeleteCalendar}
-                  className="text-destructive focus:text-destructive"
-                >
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  Delete complete calendar
-                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onSelect={handleLogout}
@@ -295,6 +271,61 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
                 onChange={(e) => setProfileForm((current) => ({ ...current, full_name: e.target.value }))}
                 disabled={profileSaving}
               />
+            </div>
+            <div className="space-y-2">
+              <Label>Profile tools</Label>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="justify-start"
+                  onClick={() => runProfileAction(onShowActivityScores)}
+                  disabled={!onShowActivityScores}
+                >
+                  <BarChart3 className="h-4 w-4" />
+                  Activity scores
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="justify-start"
+                  onClick={() => runProfileAction(onShowTaskHistory)}
+                  disabled={!onShowTaskHistory}
+                >
+                  <History className="h-4 w-4" />
+                  Task history
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="justify-start"
+                  onClick={() => runProfileAction(onShowRoutineProfiles)}
+                  disabled={!onShowRoutineProfiles}
+                >
+                  <Repeat className="h-4 w-4" />
+                  Routines
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="justify-start"
+                  onClick={() => runProfileAction(onImportCalendar)}
+                  disabled={!onImportCalendar}
+                >
+                  <UploadCloud className="h-4 w-4" />
+                  Import calendar
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="justify-start text-destructive hover:text-destructive"
+                  onClick={() => runProfileAction(handleDeleteCalendar)}
+                  disabled={!onDeleteCalendar}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete calendar
+                </Button>
+              </div>
             </div>
             <div className="space-y-2">
               <Label htmlFor="profile-password">New password</Label>

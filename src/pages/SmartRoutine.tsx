@@ -141,8 +141,11 @@ const SmartRoutine = () => {
         }),
       });
       if (!response.ok) throw new Error("Routine generation failed");
-      const data = await response.json() as { tasks?: RoutineTask[] };
+      const data = await response.json() as { tasks?: RoutineTask[]; message?: string };
       const routineTasks = Array.isArray(data.tasks) ? data.tasks : [];
+      if (data.message) {
+        toast.message(data.message);
+      }
       if (routineTasks.length === 0) {
         toast.error("No routine tasks returned.");
         return;

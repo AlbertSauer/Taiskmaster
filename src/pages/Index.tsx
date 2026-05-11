@@ -112,7 +112,6 @@ const Index = () => {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [editing, setEditing] = useState<TaskDialogInitial | null>(null);
-  const [completedDialogOpen, setCompletedDialogOpen] = useState(false);
   const [activityScoresOpen, setActivityScoresOpen] = useState(false);
   const [taskHistoryOpen, setTaskHistoryOpen] = useState(false);
   const [routineProfilesOpen, setRoutineProfilesOpen] = useState(false);
@@ -206,7 +205,6 @@ const Index = () => {
     const todayTasks = tasks.filter((t) => isToday(parseISO(t.date)));
     return { today: todayTasks.length };
   }, [tasks]);
-  const completedTasks = useMemo(() => sortTasks(tasks.filter((task) => task.completed), "datetime"), [tasks]);
   const liveWindow = useMemo(() => {
     const openTasks = tasks.filter((task) => !task.completed);
     const now = new Date();
@@ -253,6 +251,12 @@ const Index = () => {
     const sum = scoreHistory.reduce((total, score) => total + Number(score.health_score || 0), 0);
     return Math.round(sum / scoreHistory.length);
   }, [scoreHistory]);
+  const activityScoreColor = useMemo(() => {
+    if (averageActivityScore === null || avgScoreLoading) return "text-muted-foreground";
+    if (averageActivityScore >= 80) return "text-success";
+    if (averageActivityScore >= 60) return "text-warning";
+    return "text-destructive";
+  }, [averageActivityScore, avgScoreLoading]);
 
   const handleSubmit = async (data: Omit<Task, "id" | "createdAt"> & { id?: string }) => {
     try {
@@ -650,7 +654,6 @@ const Index = () => {
         onNewTask={handleNew}
         onImportCalendar={() => setImportOpen(true)}
         onDeleteCalendar={handleDeleteCalendar}
-        onShowCompletedTasks={() => setCompletedDialogOpen(true)}
         onShowActivityScores={() => {
           setActivityScoresOpen(true);
           loadActivityScores();
@@ -690,12 +693,12 @@ const Index = () => {
                   <TooltipProvider delayDuration={120}>
                     <Tooltip>
                       <TooltipTrigger asChild>
-                        <div className="h-20 w-20 shrink-0 self-start rounded-lg border border-border bg-card p-2 text-center shadow-xs">
-                          <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Act score</p>
-                          <p className="mt-1 text-xl font-semibold leading-none">
+                        <div className="h-20 w-20 shrink-0 self-start rounded-lg border border-border bg-card p-2 text-center shadow-xs lg:h-28 lg:w-28 lg:p-3">
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground lg:text-[11px]">Act score</p>
+                          <p className={`mt-1 text-xl font-semibold leading-none lg:mt-2 lg:text-3xl ${activityScoreColor}`}>
                             {avgScoreLoading ? "..." : averageActivityScore ?? "--"}
                           </p>
-                          <p className="mt-1 text-[10px] text-muted-foreground">/100</p>
+                          <p className="mt-1 text-[10px] text-muted-foreground lg:text-xs">/100</p>
                         </div>
                       </TooltipTrigger>
                       <TooltipContent side="left" className="max-w-[260px] text-xs leading-relaxed">
@@ -809,36 +812,6 @@ const Index = () => {
       />
 
       <AssistantPanel onProposedAction={handleProposedAction} />
-
-      <Dialog open={completedDialogOpen} onOpenChange={setCompletedDialogOpen}>
-        <DialogContent className="sm:max-w-[680px]">
-          <DialogHeader>
-            <DialogTitle>Done tasks</DialogTitle>
-            <DialogDescription>
-              {completedTasks.length === 0
-                ? "No completed tasks yet."
-                : `${completedTasks.length} completed task${completedTasks.length === 1 ? "" : "s"}.`}
-            </DialogDescription>
-          </DialogHeader>
-          {completedTasks.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Complete a task to see it listed here.</p>
-          ) : (
-            <div className="max-h-[55vh] space-y-2 overflow-y-auto pr-1">
-              {completedTasks.map((task) => (
-                <div key={task.id} className="rounded-lg border border-border bg-card p-3">
-                  <p className="font-medium leading-tight">{task.title}</p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {task.date}{task.time ? ` · ${task.time}` : ""}{task.location ? ` · ${task.location}` : ""}
-                  </p>
-                  {task.description && (
-                    <p className="mt-2 text-sm text-muted-foreground">{task.description}</p>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
 
       <Dialog open={activityScoresOpen} onOpenChange={setActivityScoresOpen}>
         <DialogContent className="sm:max-w-[720px]">

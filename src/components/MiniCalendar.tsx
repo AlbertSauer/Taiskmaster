@@ -46,7 +46,7 @@ export const MiniCalendar = ({ tasks, selected, onSelect }: Props) => {
           <p className="mb-2 text-xs font-medium text-muted-foreground">
             {format(selected, "EEEE, MMM d")} · {dayTasks.length} task{dayTasks.length === 1 ? "" : "s"}
           </p>
-          <div className="space-y-1.5 max-h-40 overflow-y-auto scrollbar-thin">
+          <div className="max-h-[2.4rem] space-y-1.5 overflow-y-auto pr-1 scrollbar-thin">
             {dayTasks.length === 0 && (
               <p className="text-xs text-muted-foreground">Nothing scheduled.</p>
             )}

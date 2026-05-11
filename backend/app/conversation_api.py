@@ -10,6 +10,7 @@ from openai import OpenAI
 from pydantic import ValidationError
 
 from app.env import load_app_env
+from app.ai_usage import record_ai_usage
 from app.schemas import (
     ComparativeAnalysis,
     ComparativeApproach,
@@ -252,6 +253,7 @@ def call_openai_for_analysis(
             {"role": "user", "content": user_message},
         ],
     )
+    record_ai_usage(response, f"conversation-{technique}")
 
     raw_text = (response.choices[0].message.content or "").strip()
     if not raw_text:
