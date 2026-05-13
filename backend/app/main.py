@@ -1,5 +1,6 @@
 import os
 from flask import Flask
+from sqlalchemy import inspect, text
 from flask_cors import CORS
 
 from app.env import load_app_env
@@ -42,6 +43,12 @@ from app.models import User, Task, Conversation, Message, ActivityScore, TaskHis
 # Create all tables
 with app.app_context():
     db.create_all()
+    inspector = inspect(db.engine)
+    if "tasks" in inspector.get_table_names():
+        task_columns = {column["name"] for column in inspector.get_columns("tasks")}
+        if "note" not in task_columns:
+            with db.engine.begin() as connection:
+                connection.execute(text("ALTER TABLE tasks ADD COLUMN note TEXT"))
 
 # Import and register blueprints
 from app.auth import auth_bp

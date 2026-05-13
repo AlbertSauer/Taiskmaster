@@ -12,7 +12,7 @@ import {
 import { formatLocalDate } from "@/lib/dateTime";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/useAuth";
-import { useTasks, optimizeSchedule } from "@/lib/taskStore";
+import { useTasks } from "@/lib/taskStore";
 import type { Task } from "@/types/task";
 import { toast } from "sonner";
 
@@ -29,6 +29,7 @@ interface AssistantTaskPayload {
   id?: string;
   title: string;
   description?: string;
+  note?: string;
   date: string;
   time?: string;
   duration?: number;
@@ -59,6 +60,8 @@ interface AssistantManagerControls {
   onOpenStatistics?: () => void;
   onOpenSmartRoutine?: () => void;
   onOpenSmartVacation?: () => void;
+  onOpenOptimizeScope?: () => void;
+  onOptimizeDate?: (date: string) => void;
 }
 
 interface PendingProposal {
@@ -200,6 +203,229 @@ const dateLabel = (date: string) => {
   const parsed = new Date(`${date}T00:00:00`);
   if (Number.isNaN(parsed.getTime())) return date;
   return parsed.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+};
+
+const assistantTimeToMinutes = (time?: string) => {
+  if (!time) return null;
+  const [hour, minute] = time.split(":").map(Number);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
+  return hour * 60 + minute;
+};
+
+const minutesToAssistantTime = (minutes: number) => {
+  const hour = Math.floor(minutes / 60).toString().padStart(2, "0");
+  const minute = (minutes % 60).toString().padStart(2, "0");
+  return `${hour}:${minute}`;
+};
+
+const normalizedTaskTitle = (title?: string) =>
+  (title || "").trim().toLowerCase().replace(/\s+/g, " ");
+
+const extractTaskNoteRequest = (input: string) => {
+  const trimmed = input.trim();
+  const patterns = [
+    /\b(?:take|add|save|write|put|attach)\s+(?:a\s+)?note\s+(?:for|to|on)\s+(.+?)\s*(?:[:;-]|\bthat\b)\s*(.+)$/i,
+    /\bnote\s+(?:for|to|on)\s+(.+?)\s*(?:[:;-]|\bthat\b)\s*(.+)$/i,
+    /\b(?:take|add|save|write|put|attach)\s+(?:this\s+)?(?:as\s+)?(?:a\s+)?note\s*(?:[:;-]|\bthat\b)\s*(.+?)\s+(?:for|to|on)\s+(.+)$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = trimmed.match(pattern);
+    if (!match) continue;
+    if (pattern === patterns[2]) {
+      return { note: match[1].trim(), taskHint: match[2].trim() };
+    }
+    return { taskHint: match[1].trim(), note: match[2].trim() };
+  }
+
+  return null;
+};
+
+const findTaskForNote = (taskHint: string, tasks: Task[]) => {
+  const hint = normalizedTaskTitle(taskHint)
+    .replace(/\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/g, "")
+    .trim();
+  if (hint.length < 2) return null;
+  const targetDate = /\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|in\s+\d+\s+days?)\b/i.test(taskHint)
+    ? parseDateReference(taskHint)
+    : null;
+  const openTasks = tasks.filter((task) => !task.completed);
+  const candidates = (targetDate ? openTasks.filter((task) => task.date === targetDate) : openTasks).filter((task) => {
+    const title = normalizedTaskTitle(task.title);
+    const description = normalizedTaskTitle(task.description);
+    const location = normalizedTaskTitle(task.location);
+    return title.includes(hint) || hint.includes(title) || description.includes(hint) || location.includes(hint);
+  });
+
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length > 1) {
+    return candidates.sort((a, b) => `${a.date}${a.time ?? ""}`.localeCompare(`${b.date}${b.time ?? ""}`))[0];
+  }
+
+  const words = hint.split(/\s+/).filter((word) => word.length > 2);
+  if (!words.length) return null;
+  const fuzzy = (targetDate ? openTasks.filter((task) => task.date === targetDate) : openTasks)
+    .map((task) => {
+      const haystack = normalizedTaskTitle(`${task.title} ${task.description ?? ""} ${task.location ?? ""}`);
+      const score = words.filter((word) => haystack.includes(word)).length;
+      return { task, score };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || `${a.task.date}${a.task.time ?? ""}`.localeCompare(`${b.task.date}${b.task.time ?? ""}`));
+
+  return fuzzy[0]?.task ?? null;
+};
+
+const buildTaskNoteAction = (input: string, tasks: Task[]): AssistantResult | null => {
+  const request = extractTaskNoteRequest(input);
+  if (!request || !request.note) return null;
+
+  const task = findTaskForNote(request.taskHint, tasks);
+  if (!task) {
+    return {
+      reply: `I could not confidently find a task matching "${request.taskHint}". Tell me the task title and note again, and I will open a preview before saving.`,
+      actions: [],
+    };
+  }
+
+  const existingNote = task.note?.trim();
+  const nextNote = existingNote ? `${existingNote}\n${request.note}` : request.note;
+  return {
+    reply: `I found "${task.title}" and prepared the note for review.`,
+    actions: [{ type: "update_task", task_id: task.id, updates: { note: nextNote } }],
+  };
+};
+
+const isRoutineCandidate = (task: Task) => {
+  const title = normalizedTaskTitle(task.title);
+  const tags = (task.tags ?? []).map((tag) => tag.toLowerCase());
+  if (!task.time) return false;
+  if (tags.includes("vacation") || tags.includes("time-off") || title === "vacation") return false;
+  return true;
+};
+
+const mostCommonValue = <T,>(values: T[], fallback: T): T => {
+  const counts = new Map<T, number>();
+  values.forEach((value) => counts.set(value, (counts.get(value) ?? 0) + 1));
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? fallback;
+};
+
+const taskOverlaps = (candidate: AssistantTaskPayload, task: Pick<Task, "date" | "time" | "duration"> | AssistantTaskPayload) => {
+  if (!candidate.time || !task.time || candidate.date !== task.date) return false;
+  const candidateStart = assistantTimeToMinutes(candidate.time);
+  const taskStart = assistantTimeToMinutes(task.time);
+  if (candidateStart === null || taskStart === null) return false;
+  const candidateEnd = candidateStart + Math.max(15, candidate.duration ?? 60);
+  const taskEnd = taskStart + Math.max(15, task.duration ?? 60);
+  return !(candidateEnd <= taskStart || taskEnd <= candidateStart);
+};
+
+const findOpenTimeForNormalDay = (
+  candidate: AssistantTaskPayload,
+  existing: Task[],
+  accepted: AssistantTaskPayload[],
+) => {
+  const duration = Math.max(15, candidate.duration ?? 60);
+  const preferredStart = assistantTimeToMinutes(candidate.time);
+  const dayStart = 7 * 60;
+  const dayEnd = 22 * 60;
+  const blockers = [
+    ...existing.filter((task) => task.date === candidate.date),
+    ...accepted.filter((task) => task.date === candidate.date),
+  ];
+
+  const canUse = (start: number) => {
+    if (start < dayStart || start + duration > dayEnd) return false;
+    const proposal = { ...candidate, time: minutesToAssistantTime(start), duration };
+    return !blockers.some((task) => taskOverlaps(proposal, task));
+  };
+
+  if (preferredStart !== null && canUse(preferredStart)) {
+    return minutesToAssistantTime(preferredStart);
+  }
+
+  for (let start = dayStart; start <= dayEnd - duration; start += 30) {
+    if (canUse(start)) return minutesToAssistantTime(start);
+  }
+
+  return null;
+};
+
+const buildNormalDayPlan = (input: string, tasks: Task[]): AssistantResult | null => {
+  const lowered = input.toLowerCase();
+  if (!/\b(plan|create|build|make|schedule)\b/.test(lowered)) return null;
+  if (!/\b(normal|typical|usual|regular|average)\s+day\b/.test(lowered)) return null;
+
+  const targetDate = parseDateReference(input);
+  const target = new Date(`${targetDate}T00:00:00`);
+  const targetWeekday = target.getDay();
+  const existingTargetTasks = tasks.filter((task) => task.date === targetDate);
+  const existingTargetTitles = new Set(existingTargetTasks.map((task) => normalizedTaskTitle(task.title)));
+
+  const sourceTasks = tasks
+    .filter((task) => task.date !== targetDate && isRoutineCandidate(task))
+    .filter((task) => {
+      const date = new Date(`${task.date}T00:00:00`);
+      return !Number.isNaN(date.getTime());
+    });
+
+  const sameWeekdayTasks = sourceTasks.filter((task) => new Date(`${task.date}T00:00:00`).getDay() === targetWeekday);
+  const primarySource = sameWeekdayTasks.length > 0 ? sameWeekdayTasks : sourceTasks;
+  if (primarySource.length === 0) {
+    return {
+      reply: "I need a little more calendar history before I can infer your normal day. Add a few recurring day-to-day tasks first, then ask me again.",
+      actions: [],
+    };
+  }
+
+  const byTitle = new Map<string, Task[]>();
+  primarySource.forEach((task) => {
+    const key = normalizedTaskTitle(task.title);
+    if (!key || existingTargetTitles.has(key)) return;
+    byTitle.set(key, [...(byTitle.get(key) ?? []), task]);
+  });
+
+  const groups = [...byTitle.values()]
+    .filter((group) => sameWeekdayTasks.length > 0 || group.length >= 2)
+    .sort((a, b) => {
+      const aTime = assistantTimeToMinutes(mostCommonValue(a.map((task) => task.time).filter(Boolean) as string[], "23:59")) ?? 1439;
+      const bTime = assistantTimeToMinutes(mostCommonValue(b.map((task) => task.time).filter(Boolean) as string[], "23:59")) ?? 1439;
+      return aTime - bTime || b.length - a.length;
+    });
+
+  const accepted: AssistantTaskPayload[] = [];
+  for (const group of groups.slice(0, 10)) {
+    const sample = group[0];
+    const commonTime = mostCommonValue(group.map((task) => task.time).filter(Boolean) as string[], sample.time ?? "09:00");
+    const commonDuration = mostCommonValue(group.map((task) => task.duration ?? 60), sample.duration ?? 60);
+    const candidate: AssistantTaskPayload = {
+      title: sample.title,
+      description: sample.description || `Part of your normal day pattern, based on similar calendar entries.`,
+      date: targetDate,
+      time: commonTime,
+      duration: commonDuration,
+      location: mostCommonValue(group.map((task) => task.location).filter(Boolean) as string[], sample.location ?? ""),
+      priority: mostCommonValue(group.map((task) => task.priority), sample.priority),
+      tags: Array.from(new Set(group.flatMap((task) => task.tags ?? []))).slice(0, 6),
+      completed: false,
+    };
+
+    const openTime = findOpenTimeForNormalDay(candidate, existingTargetTasks, accepted);
+    if (!openTime) continue;
+    accepted.push({ ...candidate, time: openTime });
+  }
+
+  if (accepted.length === 0) {
+    return {
+      reply: `${dateLabel(targetDate)} already has tasks that block the normal-day activities I inferred. I did not create an overlapping plan.`,
+      actions: [],
+    };
+  }
+
+  return {
+    reply: `I built a normal-day plan for ${dateLabel(targetDate)} based on your calendar patterns. Review it before saving.`,
+    actions: [{ type: "create_tasks", tasks: accepted }],
+  };
 };
 
 const weekdayLookup: Record<string, number> = {
@@ -500,13 +726,6 @@ const runLocalFallbackAssistant = async (
 
   if (!text) return { reply: "Tell me what you'd like to do." };
 
-  if (text.includes("optimize") || text.includes("reorganize")) {
-    return {
-      reply: "I will reorganize your schedule.",
-      actions: [{ type: "optimize_schedule" }]
-    };
-  }
-
   const recurringTasks = parseRecurringTasks(input);
   if (recurringTasks) return recurringTasks;
 
@@ -706,12 +925,53 @@ const buildCalendarManagerReply = (input: string, tasks: Task[]) => {
   return null;
 };
 
+const buildBulkDeleteByDate = (input: string, tasks: Task[]): AssistantResult | null => {
+  const lowered = input.toLowerCase();
+  if (!/\b(delete|remove|cancel|clear)\b/.test(lowered)) return null;
+  if (!/\b(all|everything|every|tasks?|calendar)\b/.test(lowered)) return null;
+  if (!/\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|in\s+\d+\s+days?)\b/.test(lowered)) return null;
+
+  const targetDate = parseDateReference(input);
+  const matchingTasks = tasks.filter((task) => task.date === targetDate);
+  if (!matchingTasks.length) {
+    return { reply: `There are no tasks planned for ${dateLabel(targetDate)} to delete.`, actions: [] };
+  }
+
+  return {
+    reply: `I can delete all ${matchingTasks.length} task${matchingTasks.length === 1 ? "" : "s"} on ${dateLabel(targetDate)}.`,
+    actions: matchingTasks.map((task) => ({ type: "delete_task", task_id: task.id })),
+  };
+};
+
 const runManagerIntent = async (
   input: string,
   ctx: ReturnType<typeof useTasks>,
   controls: AssistantManagerControls,
 ): Promise<AssistantResult | null> => {
   const text = input.trim().toLowerCase();
+
+  const noteAction = buildTaskNoteAction(input, ctx.tasks);
+  if (noteAction) return noteAction;
+
+  if (/\b(optimize|optimise|reorganize|reorganise)\b/.test(text)) {
+    const hasDateScope = /\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|in\s+\d+\s+days?)\b/.test(text);
+    if (hasDateScope) {
+      const date = parseDateReference(input);
+      controls.onOptimizeDate?.(date);
+      return { reply: `Opened an optimize preview for ${dateLabel(date)}.` };
+    }
+    controls.onOpenOptimizeScope?.();
+    return {
+      reply: "Which day or timeframe should I optimize? I opened the optimizer options.",
+      actions: [],
+    };
+  }
+
+  const normalDayPlan = buildNormalDayPlan(input, ctx.tasks);
+  if (normalDayPlan) return normalDayPlan;
+
+  const bulkDelete = buildBulkDeleteByDate(input, ctx.tasks);
+  if (bulkDelete) return bulkDelete;
 
   if (/\b(open|show|go to|take me to)\b/.test(text)) {
     if (/\b(options|settings|profile)\b/.test(text)) {
@@ -790,6 +1050,7 @@ const runAssistant = async (
             id: task.id,
             title: task.title,
             description: task.description,
+            note: task.note,
             date: task.date,
             time: task.time,
             duration: task.duration,
@@ -820,14 +1081,16 @@ const runAssistant = async (
 const applyAssistantActions = async (
   actions: AssistantAction[],
   ctx: ReturnType<typeof useTasks>,
+  controls: AssistantManagerControls,
 ) => {
-  const { addTask, replaceAll } = ctx;
+  const { addTask } = ctx;
 
   for (const action of actions) {
     if (action.type === "create_task" && action.task) {
       await addTask({
         title: action.task.title,
         description: action.task.description,
+        note: action.task.note,
         date: action.task.date,
         time: action.task.time,
         duration: action.task.duration,
@@ -841,6 +1104,7 @@ const applyAssistantActions = async (
         await addTask({
           title: task.title,
           description: task.description,
+          note: task.note,
           date: task.date,
           time: task.time,
           duration: task.duration,
@@ -855,7 +1119,7 @@ const applyAssistantActions = async (
     } else if (action.type === "delete_task" && action.task_id) {
       await ctx.deleteTask(action.task_id);
     } else if (action.type === "optimize_schedule") {
-      await replaceAll(optimizeSchedule(ctx.tasks));
+      controls.onOpenOptimizeScope?.();
     }
   }
 };
@@ -990,7 +1254,7 @@ export const AssistantPanel = ({
 
     try {
       if (pendingProposal && isConfirmationMessage(trimmed)) {
-        await applyAssistantActions(pendingProposal.actions, taskCtx);
+        await applyAssistantActions(pendingProposal.actions, taskCtx, managerControls);
         const replyText = "Done. I’ve applied those changes.";
         const reply: Message = {
           id: crypto.randomUUID(),

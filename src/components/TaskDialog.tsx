@@ -36,6 +36,7 @@ const emptyForm = () => {
   return {
     title: "",
     description: "",
+    note: "",
     date: formatLocalDate(now),
     time: formatLocalTime(now),
     duration: "",
@@ -56,6 +57,7 @@ export const TaskDialog = ({ open, onOpenChange, initial, onSubmit }: Props) => 
         setForm({
           title: initial.title ?? "",
           description: initial.description ?? "",
+          note: initial.note ?? "",
           date: initial.date || formatLocalDate(new Date()),
           time: initial.time ?? "",
           duration: initial.duration?.toString() ?? "",
@@ -79,6 +81,7 @@ export const TaskDialog = ({ open, onOpenChange, initial, onSubmit }: Props) => 
         id: isExistingTask ? initial?.id : undefined,
         title: form.title.trim(),
         description: form.description.trim() || undefined,
+        note: form.note.trim() || undefined,
         date: form.date,
         time: form.time || undefined,
         duration: form.duration ? Number(form.duration) : undefined,
@@ -123,6 +126,17 @@ export const TaskDialog = ({ open, onOpenChange, initial, onSubmit }: Props) => 
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
               placeholder="Add more context (optional)"
+              rows={3}
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="note">Note</Label>
+            <Textarea
+              id="note"
+              value={form.note}
+              onChange={(e) => setForm({ ...form, note: e.target.value })}
+              placeholder="Private note or extra task details (optional)"
               rows={3}
             />
           </div>

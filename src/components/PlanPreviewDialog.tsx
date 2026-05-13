@@ -21,6 +21,7 @@ export function PlanPreviewDialog({ open, onOpenChange, action, onConfirm }: Pla
   const [draftTasks, setDraftTasks] = useState(sourceTasks.map((task) => ({
     title: task.title || "New Task",
     description: task.description || undefined,
+    note: task.note || undefined,
     date: task.date || new Date().toISOString().split("T")[0],
     time: task.time || undefined,
     duration: task.duration || undefined,
@@ -35,6 +36,7 @@ export function PlanPreviewDialog({ open, onOpenChange, action, onConfirm }: Pla
     setDraftTasks(sourceTasks.map((task) => ({
       title: task.title || "New Task",
       description: task.description || undefined,
+      note: task.note || undefined,
       date: task.date || new Date().toISOString().split("T")[0],
       time: task.time || undefined,
       duration: task.duration || undefined,

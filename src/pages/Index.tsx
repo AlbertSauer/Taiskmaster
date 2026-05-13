@@ -18,10 +18,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useTasks, sortTasks, optimizeSchedule, inferTaskTags } from "@/lib/taskStore";
+import { useTasks, sortTasks, optimizeSchedule, inferTaskTags, fetchTaskHistory } from "@/lib/taskStore";
+import {
+  findProtectedWorkConflicts,
+  isProtectedWorkTask,
+  moveTasksOutsideProtectedWork,
+} from "@/lib/scheduleGuards";
 import { useAuth } from "@/hooks/useAuth";
 import type { SortMode, Task } from "@/types/task";
-import { format, isSameDay, parseISO, isToday } from "date-fns";
+import { addDays, format, isBefore, isSameDay, isToday, parseISO, startOfDay } from "date-fns";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
@@ -95,10 +100,127 @@ interface OptimizeConflictSuggestion {
   suggestionDate: string;
   suggestionTime: string;
 }
-const isLockedOptimizeTask = (task: Task) => {
-  const title = (task.title || "").trim().toLowerCase();
-  const tags = Array.isArray(task.tags) ? task.tags.map((tag) => String(tag).toLowerCase()) : [];
-  return title === "work hours" || title.startsWith("work break") || tags.includes("work") || tags.includes("work-break");
+type OptimizeScopeChoice = "today" | "tomorrow" | "selected" | "custom" | "next7" | "range" | "all";
+interface OptimizeScope {
+  kind: "all" | "date" | "range";
+  start?: string;
+  end?: string;
+  label: string;
+}
+const isLockedOptimizeTask = isProtectedWorkTask;
+
+const taskStartMinutes = (time?: string) => {
+  if (!time) return null;
+  const [hour, minute] = time.split(":").map(Number);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
+  return hour * 60 + minute;
+};
+
+const rangesOverlap = (startA: number, durationA: number, startB: number, durationB: number) => {
+  const endA = startA + Math.max(15, durationA || 60);
+  const endB = startB + Math.max(15, durationB || 60);
+  return !(endA <= startB || endB <= startA);
+};
+
+const recommendationOverlapsTasks = (
+  recommendation: Recommendation,
+  existingTasks: Task[],
+  acceptedRecommendations: Recommendation[],
+) => {
+  const suggested = recommendation.suggested_task;
+  if (!suggested?.date || !suggested.time) return false;
+
+  const suggestedStart = taskStartMinutes(suggested.time);
+  if (suggestedStart === null) return true;
+  const suggestedDuration = suggested.duration ?? 60;
+
+  const candidateTasks = [
+    ...existingTasks,
+    ...acceptedRecommendations
+      .map((item) => item.suggested_task)
+      .filter((task): task is Omit<Task, "id" | "createdAt"> => !!task)
+      .map((task) => ({ ...task, id: "recommendation", createdAt: "" })),
+  ];
+
+  return candidateTasks.some((task) => {
+    if (task.date !== suggested.date || !task.time) return false;
+    const taskStart = taskStartMinutes(task.time);
+    if (taskStart === null) return false;
+    return rangesOverlap(suggestedStart, suggestedDuration, taskStart, task.duration ?? 60);
+  });
+};
+
+const removeOverlappingRecommendations = (items: Recommendation[], existingTasks: Task[]) => {
+  const accepted: Recommendation[] = [];
+  for (const item of items) {
+    if (!recommendationOverlapsTasks(item, existingTasks, accepted)) {
+      accepted.push(item);
+    }
+  }
+  return accepted;
+};
+
+const isoDate = (date: Date) => format(date, "yyyy-MM-dd");
+
+const dateIsInOptimizeScope = (task: Task, scope: OptimizeScope | null) => {
+  if (!scope || scope.kind === "all") return true;
+  if (scope.kind === "date") return task.date === scope.start;
+  if (!scope.start || !scope.end) return true;
+  return task.date >= scope.start && task.date <= scope.end;
+};
+
+const taskSearchText = (task: Task) => {
+  const parsedDate = parseISO(task.date);
+  const dateParts = Number.isNaN(parsedDate.getTime())
+    ? [task.date]
+    : [
+        task.date,
+        format(parsedDate, "EEEE"),
+        format(parsedDate, "EEE"),
+        format(parsedDate, "MMMM"),
+        format(parsedDate, "MMM"),
+        format(parsedDate, "MMM d"),
+      ];
+
+  return [
+    task.title,
+    task.description,
+    task.note,
+    task.location,
+    task.date,
+    task.time,
+    task.duration ? `${task.duration} minutes ${Math.round(task.duration / 60)} hours` : "",
+    task.priority,
+    task.completed ? "done completed finished" : "open active unfinished pending",
+    ...(task.tags ?? []),
+    ...dateParts,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+};
+
+const taskMatchesSearch = (task: Task, rawQuery: string) => {
+  const query = rawQuery.trim().toLowerCase();
+  if (!query) return true;
+
+  const today = new Date();
+  const taskDate = parseISO(task.date);
+  if (!Number.isNaN(taskDate.getTime())) {
+    if (query === "today" && isToday(taskDate)) return true;
+    const tomorrow = new Date(today);
+    tomorrow.setDate(today.getDate() + 1);
+    if (query === "tomorrow" && isSameDay(taskDate, tomorrow)) return true;
+    if (query === "overdue" && isBefore(startOfDay(taskDate), startOfDay(today)) && !task.completed) return true;
+    if ((query === "done" || query === "completed") && task.completed) return true;
+    if ((query === "open" || query === "unfinished" || query === "pending") && !task.completed) return true;
+  }
+
+  const searchable = taskSearchText(task);
+  return query
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((part) => searchable.includes(part));
 };
 
 const Index = () => {
@@ -109,6 +231,7 @@ const Index = () => {
   const [query, setQuery] = useState("");
   const [selectedDate, setSelectedDate] = useState<Date | undefined>(new Date());
   const [dateFilter, setDateFilter] = useState("");
+  const [markingDayDone, setMarkingDayDone] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [editing, setEditing] = useState<TaskDialogInitial | null>(null);
@@ -123,15 +246,24 @@ const Index = () => {
   const [insights, setInsights] = useState<ActivityInsights | null>(null);
   const [insightsLoading, setInsightsLoading] = useState(false);
   const [scoreHistory, setScoreHistory] = useState<ActivityScoreHistoryItem[]>([]);
+  const [activityScoreQuery, setActivityScoreQuery] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
   const [avgScoreLoading, setAvgScoreLoading] = useState(false);
   const [taskHistory, setTaskHistory] = useState<TaskHistoryItem[]>([]);
+  const [taskHistoryQuery, setTaskHistoryQuery] = useState("");
   const [taskHistoryLoading, setTaskHistoryLoading] = useState(false);
   const [routineProfiles, setRoutineProfiles] = useState<RoutineProfileItem[]>([]);
+  const [routineProfilesQuery, setRoutineProfilesQuery] = useState("");
   const [routineProfilesLoading, setRoutineProfilesLoading] = useState(false);
+  const [optimizeScopeOpen, setOptimizeScopeOpen] = useState(false);
+  const [optimizeScopeChoice, setOptimizeScopeChoice] = useState<OptimizeScopeChoice>("today");
+  const [optimizeCustomDate, setOptimizeCustomDate] = useState(() => isoDate(new Date()));
+  const [optimizeRangeStart, setOptimizeRangeStart] = useState(() => isoDate(new Date()));
+  const [optimizeRangeEnd, setOptimizeRangeEnd] = useState(() => isoDate(addDays(new Date(), 6)));
   const [optimizePreviewOpen, setOptimizePreviewOpen] = useState(false);
   const [optimizePreviewTasks, setOptimizePreviewTasks] = useState<Task[]>([]);
   const [optimizeRemovedCount, setOptimizeRemovedCount] = useState(0);
+  const [activeOptimizeScope, setActiveOptimizeScope] = useState<OptimizeScope | null>(null);
   const optimizeConflicts = useMemo<OptimizeConflictSuggestion[]>(() => {
     const byDate = new Map<string, Task[]>();
     for (const task of optimizePreviewTasks) {
@@ -190,16 +322,24 @@ const Index = () => {
       list = list.filter((t) => isSameDay(parseISO(t.date), selectedDate));
     }
     if (query.trim()) {
-      const q = query.toLowerCase();
-      list = list.filter((t) =>
-        t.title.toLowerCase().includes(q)
-        || t.description?.toLowerCase().includes(q)
-        || t.location?.toLowerCase().includes(q)
-        || t.tags?.some((tag) => tag.toLowerCase().includes(q)),
-      );
+      list = list.filter((task) => taskMatchesSearch(task, query));
     }
     return sortTasks(list, sort);
   }, [tasks, sort, query, selectedDate, dateFilter]);
+  const selectedDayIso = useMemo(() => {
+    if (dateFilter) return dateFilter;
+    if (selectedDate) return format(selectedDate, "yyyy-MM-dd");
+    return "";
+  }, [dateFilter, selectedDate]);
+  const selectedDayOpenTasks = useMemo(
+    () => tasks.filter((task) => task.date === selectedDayIso && !task.completed),
+    [selectedDayIso, tasks],
+  );
+  const canMarkSelectedDayDone = useMemo(() => {
+    if (!selectedDayIso || selectedDayOpenTasks.length === 0) return false;
+    const selected = parseISO(selectedDayIso);
+    return !Number.isNaN(selected.getTime()) && isBefore(startOfDay(selected), startOfDay(new Date()));
+  }, [selectedDayIso, selectedDayOpenTasks.length]);
 
   const stats = useMemo(() => {
     const todayTasks = tasks.filter((t) => isToday(parseISO(t.date)));
@@ -257,20 +397,109 @@ const Index = () => {
     if (averageActivityScore >= 60) return "text-warning";
     return "text-destructive";
   }, [averageActivityScore, avgScoreLoading]);
+  const filteredScoreHistory = useMemo(() => {
+    const query = activityScoreQuery.trim().toLowerCase();
+    if (!query) return scoreHistory;
+    return scoreHistory.filter((score) => {
+      const haystack = [
+        score.health_score,
+        score.status,
+        score.summary,
+        ...(score.guidance ?? []),
+        score.graphs?.load?.avg_minutes_per_day,
+        score.graphs?.load?.busy_days,
+        score.graphs?.load?.scheduled_days,
+        ...(score.graphs?.activity_mix ?? []).flatMap((point) => [point.label, point.minutes, point.percent]),
+        score.created_at,
+        new Date(score.created_at).toLocaleDateString(),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return query.split(/\s+/).filter(Boolean).every((part) => haystack.includes(part));
+    });
+  }, [activityScoreQuery, scoreHistory]);
+  const filteredRoutineProfiles = useMemo(() => {
+    const query = routineProfilesQuery.trim().toLowerCase();
+    if (!query) return routineProfiles;
+    return routineProfiles.filter((profile) => {
+      const questionnaire = profile.questionnaire ?? {};
+      const haystack = [
+        profile.name,
+        profile.end_date,
+        profile.created_at,
+        new Date(profile.created_at).toLocaleDateString(),
+        JSON.stringify(questionnaire),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return query.split(/\s+/).filter(Boolean).every((part) => haystack.includes(part));
+    });
+  }, [routineProfiles, routineProfilesQuery]);
+  const filteredTaskHistory = useMemo(() => {
+    const query = taskHistoryQuery.trim().toLowerCase();
+    if (!query) return taskHistory;
+    return taskHistory.filter((item) => {
+      const snapshot = item.snapshot ?? {};
+      const haystack = [
+        item.action,
+        item.title,
+        item.task_id,
+        item.created_at,
+        snapshot.title,
+        snapshot.description,
+        snapshot.note,
+        snapshot.date,
+        snapshot.time,
+        snapshot.duration,
+        snapshot.location,
+        snapshot.priority,
+        snapshot.completed ? "done completed" : "open unfinished",
+        ...(snapshot.tags ?? []),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return query.split(/\s+/).filter(Boolean).every((part) => haystack.includes(part));
+    });
+  }, [taskHistory, taskHistoryQuery]);
 
   const handleSubmit = async (data: Omit<Task, "id" | "createdAt"> & { id?: string }) => {
     try {
+      const [safeData] = prepareTasksForProtectedWork([data]);
       if (data.id) {
-        await updateTask(data.id, data);
+        await updateTask(data.id, safeData);
         toast.success("Task updated");
       } else {
-        const created = await addTask(data);
+        const created = await addTask(safeData);
         setSelectedDate(parseISO(created.date));
         toast.success("Task created");
       }
     } catch (error) {
       toast.error(data.id ? "Could not update task." : "Could not create task.");
       throw error;
+    }
+  };
+
+  const handleMarkSelectedDayDone = async () => {
+    if (!canMarkSelectedDayDone || selectedDayOpenTasks.length === 0) return;
+    const confirmed = window.confirm(
+      `Mark all ${selectedDayOpenTasks.length} open task${selectedDayOpenTasks.length === 1 ? "" : "s"} on ${selectedDayIso} as done?`,
+    );
+    if (!confirmed) return;
+
+    try {
+      setMarkingDayDone(true);
+      await Promise.all(selectedDayOpenTasks.map((task) => updateTask(task.id, { completed: true })));
+      toast.success(`Marked ${selectedDayOpenTasks.length} task${selectedDayOpenTasks.length === 1 ? "" : "s"} as done.`);
+    } catch {
+      toast.error("Could not mark the selected day as done.");
+    } finally {
+      setMarkingDayDone(false);
     }
   };
 
@@ -284,35 +513,97 @@ const Index = () => {
     setDialogOpen(true);
   };
 
+  const warnAboutProtectedWork = (warnings: string[]) => {
+    if (!warnings.length) return;
+    const blockedCount = warnings.filter((warning) => warning.includes("still overlaps")).length;
+    toast.warning(
+      blockedCount > 0
+        ? "Some tasks still overlap protected work time."
+        : "Moved task time outside protected work.",
+      {
+        description: warnings.slice(0, 2).join(" "),
+      },
+    );
+  };
+
+  const prepareTasksForProtectedWork = <T extends Omit<Task, "id" | "createdAt">>(drafts: T[]) => {
+    const result = moveTasksOutsideProtectedWork(drafts, tasks);
+    warnAboutProtectedWork(result.warnings);
+    return result.tasks;
+  };
+
   const openDraftTask = (draft: Omit<Task, "id" | "createdAt">) => {
+    const [safeDraft] = prepareTasksForProtectedWork([draft]);
     const normalizedTags = inferTaskTags({
-      title: draft.title,
-      description: draft.description,
-      location: draft.location,
-      tags: Array.isArray(draft.tags) ? draft.tags : [],
+      title: safeDraft.title,
+      description: safeDraft.description,
+      location: safeDraft.location,
+      tags: Array.isArray(safeDraft.tags) ? safeDraft.tags : [],
     });
     setEditing({
-      title: draft.title,
-      description: draft.description,
-      date: draft.date || new Date().toISOString().split("T")[0],
-      time: draft.time,
-      duration: draft.duration,
-      location: draft.location,
-      priority: draft.priority || "medium",
+      title: safeDraft.title,
+      description: safeDraft.description,
+      date: safeDraft.date || new Date().toISOString().split("T")[0],
+      time: safeDraft.time,
+      duration: safeDraft.duration,
+      location: safeDraft.location,
+      priority: safeDraft.priority || "medium",
       tags: normalizedTags,
-      completed: !!draft.completed,
+      completed: !!safeDraft.completed,
     });
     setDialogOpen(true);
   };
 
   const handleImport = (items: Omit<Task, "id" | "createdAt">[]) => {
-    items.forEach((item) => addTask(item));
+    prepareTasksForProtectedWork(items).forEach((item) => addTask(item));
     toast.success(`${items.length} event${items.length === 1 ? "" : "s"} imported from Google Calendar.`);
   };
 
-  const handleOptimize = async () => {
+  const openOptimizeScopeDialog = () => {
+    const today = new Date();
+    setOptimizeScopeChoice(selectedDayIso ? "selected" : "today");
+    setOptimizeCustomDate(selectedDayIso || isoDate(today));
+    setOptimizeRangeStart(selectedDayIso || isoDate(today));
+    setOptimizeRangeEnd(isoDate(addDays(selectedDayIso ? parseISO(selectedDayIso) : today, 6)));
+    setOptimizeScopeOpen(true);
+  };
+
+  const buildOptimizeScope = (choice = optimizeScopeChoice): OptimizeScope => {
+    const today = new Date();
+    const todayString = isoDate(today);
+    const tomorrowString = isoDate(addDays(today, 1));
+    const selectedString = selectedDayIso || todayString;
+
+    if (choice === "today") return { kind: "date", start: todayString, end: todayString, label: "today" };
+    if (choice === "tomorrow") return { kind: "date", start: tomorrowString, end: tomorrowString, label: "tomorrow" };
+    if (choice === "selected") return { kind: "date", start: selectedString, end: selectedString, label: selectedString };
+    if (choice === "custom") return { kind: "date", start: optimizeCustomDate, end: optimizeCustomDate, label: optimizeCustomDate };
+    if (choice === "next7") {
+      return { kind: "range", start: todayString, end: isoDate(addDays(today, 6)), label: "the next 7 days" };
+    }
+    if (choice === "range") {
+      const start = optimizeRangeStart <= optimizeRangeEnd ? optimizeRangeStart : optimizeRangeEnd;
+      const end = optimizeRangeStart <= optimizeRangeEnd ? optimizeRangeEnd : optimizeRangeStart;
+      return { kind: "range", start, end, label: `${start} to ${end}` };
+    }
+    return { kind: "all", label: "the whole calendar" };
+  };
+
+  const handleChooseOptimizeScope = () => {
+    const scope = buildOptimizeScope();
+    setOptimizeScopeOpen(false);
+    void handleOptimize(scope);
+  };
+
+  const handleOptimize = async (scope: OptimizeScope) => {
     try {
-      let baseTasks = tasks;
+      setActiveOptimizeScope(scope);
+      let baseTasks = tasks.filter((task) => dateIsInOptimizeScope(task, scope));
+      if (baseTasks.length === 0) {
+        setActiveOptimizeScope(null);
+        toast.info(`No tasks found in ${scope.label} to optimize.`);
+        return;
+      }
 
       if (API_BASE) {
         const token = localStorage.getItem("authToken");
@@ -323,10 +614,11 @@ const Index = () => {
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
           body: JSON.stringify({
-            tasks: tasks.map((task) => ({
+            tasks: baseTasks.map((task) => ({
               id: task.id,
               title: task.title,
               description: task.description,
+              note: task.note,
               date: task.date,
               time: task.time,
               duration: task.duration,
@@ -340,30 +632,51 @@ const Index = () => {
 
         if (response.ok) {
           const data = await response.json() as { tasks?: Task[] };
-          if (Array.isArray(data.tasks) && data.tasks.length === tasks.length) {
+          if (Array.isArray(data.tasks) && data.tasks.length === baseTasks.length) {
             baseTasks = data.tasks;
           }
         }
       }
 
-      const optimized = optimizeSchedule(baseTasks);
+      const optimizedResult = moveTasksOutsideProtectedWork(optimizeSchedule(baseTasks), tasks);
+      warnAboutProtectedWork(optimizedResult.warnings);
+      const optimized = optimizedResult.tasks;
       setOptimizeRemovedCount(Math.max(0, baseTasks.length - optimized.length));
       setOptimizePreviewTasks(optimized);
       setOptimizePreviewOpen(true);
     } catch {
+      setActiveOptimizeScope(null);
       toast.error("Could not optimize schedule right now.");
     }
   };
 
   const handleConfirmOptimize = async () => {
     try {
-      await replaceAll(optimizePreviewTasks);
+      if (activeOptimizeScope && activeOptimizeScope.kind !== "all") {
+        const nextTasks = [
+          ...tasks.filter((task) => !dateIsInOptimizeScope(task, activeOptimizeScope)),
+          ...optimizePreviewTasks,
+        ];
+        await replaceAll(nextTasks);
+      } else {
+        await replaceAll(optimizePreviewTasks);
+      }
       toast.success("Schedule optimized", {
-        description: "Duplicates removed and tasks reorganized for a more efficient flow.",
+        description: activeOptimizeScope
+          ? `Tasks in ${activeOptimizeScope.label} were reorganized.`
+          : "Duplicates removed and tasks reorganized for a more efficient flow.",
       });
       setOptimizePreviewOpen(false);
+      setActiveOptimizeScope(null);
     } catch {
       toast.error("Could not apply optimized schedule.");
+    }
+  };
+
+  const handleOptimizePreviewOpenChange = (open: boolean) => {
+    setOptimizePreviewOpen(open);
+    if (!open) {
+      setActiveOptimizeScope(null);
     }
   };
 
@@ -419,6 +732,7 @@ const Index = () => {
             id: task.id,
             title: task.title,
             description: task.description,
+            note: task.note,
             date: task.date,
             time: task.time,
             duration: task.duration,
@@ -432,7 +746,7 @@ const Index = () => {
 
       if (!response.ok) throw new Error("Could not generate recommendations");
       const data = await response.json() as { recommendations?: Recommendation[] };
-      setRecommendations(data.recommendations ?? []);
+      setRecommendations(removeOverlappingRecommendations(data.recommendations ?? [], tasks));
       toast.success("Recommendations ready");
     } catch {
       toast.error("Recommendations are unavailable right now.");
@@ -458,6 +772,7 @@ const Index = () => {
       openDraftTask({
         title: action.task.title || "New Task",
         description: action.task.description,
+        note: action.task.note,
         date: action.task.date || new Date().toISOString().split("T")[0],
         time: action.task.time,
         duration: action.task.duration,
@@ -473,17 +788,28 @@ const Index = () => {
         setDialogOpen(true);
       }
     } else if (action.type === "create_tasks" && action.tasks) {
-      setPlanAction(action);
+      setPlanAction({
+        ...action,
+        tasks: prepareTasksForProtectedWork(action.tasks),
+      });
     }
   };
 
   const handleConfirmPlan = async (tasksToSave: Omit<Task, "id" | "createdAt">[]) => {
     if (!tasksToSave || tasksToSave.length === 0) return;
     try {
-      for (const task of tasksToSave) {
+      const safeTasks = prepareTasksForProtectedWork(tasksToSave);
+      const conflicts = findProtectedWorkConflicts(safeTasks, tasks);
+      if (conflicts.length > 0) {
+        toast.warning("Saving tasks with protected work-time overlap.", {
+          description: `${conflicts.length} task${conflicts.length === 1 ? "" : "s"} could not be moved automatically.`,
+        });
+      }
+      for (const task of safeTasks) {
         await addTask({
           title: task.title || "New Task",
           description: task.description || undefined,
+          note: task.note || undefined,
           date: task.date || new Date().toISOString().split("T")[0],
           time: task.time || undefined,
           duration: task.duration || undefined,
@@ -520,6 +846,7 @@ const Index = () => {
             id: task.id,
             title: task.title,
             description: task.description,
+            note: task.note,
             date: task.date,
             time: task.time,
             duration: task.duration,
@@ -573,20 +900,8 @@ const Index = () => {
   const loadTaskHistory = async () => {
     setTaskHistoryLoading(true);
     try {
-      if (!API_BASE) {
-        setTaskHistory([]);
-        return;
-      }
-      const token = localStorage.getItem("authToken");
-      const response = await fetch(`${API_BASE}/api/tasks/history`, {
-        method: "GET",
-        headers: {
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-      });
-      if (!response.ok) throw new Error("Could not load task history");
-      const data = await response.json() as { history?: TaskHistoryItem[] };
-      setTaskHistory(Array.isArray(data.history) ? data.history : []);
+      const data = await fetchTaskHistory();
+      setTaskHistory(Array.isArray(data) ? data : []);
     } catch {
       setTaskHistory([]);
       toast.error("Could not load task history.");
@@ -645,7 +960,6 @@ const Index = () => {
 
   useEffect(() => {
     const formatter = new Intl.DateTimeFormat(undefined, {
-      weekday: "short",
       month: "short",
       day: "2-digit",
       hour: "2-digit",
@@ -660,7 +974,7 @@ const Index = () => {
   return (
     <div className="min-h-screen bg-gradient-subtle">
       <Header
-        onOptimize={handleOptimize}
+        onOptimize={openOptimizeScopeDialog}
         onNewTask={handleNew}
         onImportCalendar={() => setImportOpen(true)}
         onDeleteCalendar={handleDeleteCalendar}
@@ -687,7 +1001,7 @@ const Index = () => {
             <div>
               <div className="max-w-2xl animate-slide-up">
                 <div className="mb-2 text-xs font-medium text-muted-foreground">
-                  Taiskmaster {heroTime ? `· ${heroTime}` : ""}
+                  {heroTime}
                 </div>
                 <div className="flex items-start justify-between gap-3">
                   <div>
@@ -783,6 +1097,19 @@ const Index = () => {
               Clear date filter
             </Button>
           )}
+
+          {canMarkSelectedDayDone && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleMarkSelectedDayDone}
+              disabled={markingDayDone}
+              title="Mark every open task on this past day as done"
+            >
+              <CheckCircle2 className="h-4 w-4" />
+              {markingDayDone ? "Marking done..." : `Mark day done (${selectedDayOpenTasks.length})`}
+            </Button>
+          )}
         </div>
 
         {visible.length === 0 ? (
@@ -840,6 +1167,10 @@ const Index = () => {
         onOpenStatistics={() => navigate("/smart-statistics")}
         onOpenSmartRoutine={() => navigate("/smart-routine")}
         onOpenSmartVacation={() => navigate("/smart-vacation")}
+        onOpenOptimizeScope={openOptimizeScopeDialog}
+        onOptimizeDate={(date) => {
+          void handleOptimize({ kind: "date", start: date, end: date, label: date });
+        }}
       />
 
       <Dialog open={activityScoresOpen} onOpenChange={setActivityScoresOpen}>
@@ -848,13 +1179,24 @@ const Index = () => {
             <DialogTitle>Activity Scores</DialogTitle>
             <DialogDescription>All saved activity score snapshots for your account.</DialogDescription>
           </DialogHeader>
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={activityScoreQuery}
+              onChange={(event) => setActivityScoreQuery(event.target.value)}
+              placeholder="Search scores by score, status, guidance, date..."
+              className="pl-9"
+            />
+          </div>
           {historyLoading ? (
             <p className="text-sm text-muted-foreground">Loading activity scores...</p>
           ) : scoreHistory.length === 0 ? (
             <p className="text-sm text-muted-foreground">No saved activity scores yet.</p>
+          ) : filteredScoreHistory.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No activity scores match your search.</p>
           ) : (
             <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
-              {scoreHistory.map((score) => (
+              {filteredScoreHistory.map((score) => (
                 <div key={score.id} className="rounded-lg border border-border bg-card p-3">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-sm font-semibold">Score {score.health_score}/100</p>
@@ -884,12 +1226,69 @@ const Index = () => {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={optimizePreviewOpen} onOpenChange={setOptimizePreviewOpen}>
+      <Dialog open={optimizeScopeOpen} onOpenChange={setOptimizeScopeOpen}>
+        <DialogContent className="sm:max-w-[520px]">
+          <DialogHeader>
+            <DialogTitle>Choose Optimize Scope</DialogTitle>
+            <DialogDescription>Select the day or timeframe the optimizer should reorganize.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <Select value={optimizeScopeChoice} onValueChange={(value) => setOptimizeScopeChoice(value as OptimizeScopeChoice)}>
+              <SelectTrigger>
+                <SelectValue placeholder="Choose scope" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="today">Today</SelectItem>
+                <SelectItem value="tomorrow">Tomorrow</SelectItem>
+                <SelectItem value="selected">Selected dashboard day</SelectItem>
+                <SelectItem value="custom">One custom day</SelectItem>
+                <SelectItem value="next7">Next 7 days</SelectItem>
+                <SelectItem value="range">Custom timeframe</SelectItem>
+                <SelectItem value="all">Whole calendar</SelectItem>
+              </SelectContent>
+            </Select>
+
+            {optimizeScopeChoice === "custom" && (
+              <Input
+                type="date"
+                value={optimizeCustomDate}
+                onChange={(event) => setOptimizeCustomDate(event.target.value)}
+              />
+            )}
+
+            {optimizeScopeChoice === "range" && (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Input
+                  type="date"
+                  value={optimizeRangeStart}
+                  onChange={(event) => setOptimizeRangeStart(event.target.value)}
+                />
+                <Input
+                  type="date"
+                  value={optimizeRangeEnd}
+                  onChange={(event) => setOptimizeRangeEnd(event.target.value)}
+                />
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setOptimizeScopeOpen(false)}>Cancel</Button>
+              <Button variant="hero" onClick={handleChooseOptimizeScope}>Preview Optimize</Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={optimizePreviewOpen} onOpenChange={handleOptimizePreviewOpenChange}>
         <DialogContent className="sm:max-w-[760px]">
           <DialogHeader>
             <DialogTitle>Optimize Preview</DialogTitle>
             <DialogDescription>
-              Review the optimized schedule before saving.
+              {activeOptimizeScope?.kind === "all"
+                ? "Review the optimized whole-calendar schedule before saving."
+                : activeOptimizeScope
+                ? `Review the optimized tasks for ${activeOptimizeScope.label} before saving. Other calendar days will stay unchanged.`
+                : "Review the optimized schedule before saving."}
               {optimizeRemovedCount > 0 ? ` ${optimizeRemovedCount} duplicate task${optimizeRemovedCount === 1 ? "" : "s"} will be removed.` : ""}
             </DialogDescription>
           </DialogHeader>
@@ -952,7 +1351,7 @@ const Index = () => {
             ))}
           </div>
           <div className="flex justify-end gap-2">
-            <Button variant="ghost" onClick={() => setOptimizePreviewOpen(false)}>Cancel</Button>
+            <Button variant="ghost" onClick={() => handleOptimizePreviewOpenChange(false)}>Cancel</Button>
             <Button variant="hero" onClick={handleConfirmOptimize}>Save Optimized Plan</Button>
           </div>
         </DialogContent>
@@ -964,23 +1363,42 @@ const Index = () => {
             <DialogTitle>Task history</DialogTitle>
             <DialogDescription>All task creation, update, and deletion events.</DialogDescription>
           </DialogHeader>
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={taskHistoryQuery}
+              onChange={(event) => setTaskHistoryQuery(event.target.value)}
+              placeholder="Search history by title, action, date, priority, tags..."
+              className="pl-9"
+            />
+          </div>
           {taskHistoryLoading ? (
             <p className="text-sm text-muted-foreground">Loading task history...</p>
           ) : taskHistory.length === 0 ? (
             <p className="text-sm text-muted-foreground">No task history yet.</p>
+          ) : filteredTaskHistory.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No history entries match your search.</p>
           ) : (
             <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
-              {taskHistory.map((item) => (
+              {filteredTaskHistory.map((item) => (
                 <div key={item.id} className="rounded-lg border border-border bg-card p-3">
                   <div className="flex items-center justify-between gap-2">
                     <p className="text-sm font-semibold">{item.title}</p>
                     <p className="text-xs text-muted-foreground">{new Date(item.created_at).toLocaleString()}</p>
                   </div>
-                  <p className="mt-1 text-xs text-muted-foreground capitalize">
-                    {item.action}
-                    {item.snapshot?.date ? ` · ${item.snapshot.date}` : ""}
-                    {item.snapshot?.time ? ` · ${item.snapshot.time}` : ""}
-                  </p>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    <span className="rounded-full bg-muted px-2 py-1 capitalize">{item.action}</span>
+                    {item.snapshot?.date ? <span>{item.snapshot.date}</span> : null}
+                    {item.snapshot?.time ? <span>{item.snapshot.time}</span> : null}
+                    {item.snapshot?.location ? <span>{item.snapshot.location}</span> : null}
+                    {item.snapshot?.priority ? <span>{item.snapshot.priority}</span> : null}
+                  </div>
+                  {item.snapshot?.description ? (
+                    <p className="mt-2 text-sm text-muted-foreground">{item.snapshot.description}</p>
+                  ) : null}
+                  {item.snapshot?.note ? (
+                    <p className="mt-2 text-sm text-muted-foreground">Note: {item.snapshot.note}</p>
+                  ) : null}
                 </div>
               ))}
             </div>
@@ -994,13 +1412,24 @@ const Index = () => {
             <DialogTitle>Routines</DialogTitle>
             <DialogDescription>Saved routine plans. Reuse one to prefill Smart Routine.</DialogDescription>
           </DialogHeader>
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={routineProfilesQuery}
+              onChange={(event) => setRoutineProfilesQuery(event.target.value)}
+              placeholder="Search routines by name, dates, work days, times..."
+              className="pl-9"
+            />
+          </div>
           {routineProfilesLoading ? (
             <p className="text-sm text-muted-foreground">Loading routines...</p>
           ) : routineProfiles.length === 0 ? (
             <p className="text-sm text-muted-foreground">No saved routines yet.</p>
+          ) : filteredRoutineProfiles.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No routines match your search.</p>
           ) : (
             <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
-              {routineProfiles.map((profile) => (
+              {filteredRoutineProfiles.map((profile) => (
                 <div key={profile.id} className="rounded-lg border border-border bg-card p-3">
                   <div className="flex items-center justify-between gap-3">
                     <div>

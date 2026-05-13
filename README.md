@@ -6,35 +6,49 @@ Taiskmaster is a React + Vite + TypeScript + Tailwind frontend with a Flask back
 
 - Daily dashboard with:
   - today-focused task view (default),
-  - date picker filter + text search,
+  - date picker filter + broad text search across title, description, notes, tags, date, priority, status, time, and location,
   - task cards showing time ranges (`from - to`),
+  - separate task notes below descriptions,
   - live window (ongoing/upcoming + countdown + next-up preview),
+  - selected-day summary under the mini calendar,
+  - one-click `Mark day done` for already-past selected days,
   - compact `Act score` with hover explanation and score-based color.
 - Direct task interactions:
   - click a task block to edit,
+  - description + note fields in task creation/editing,
   - one-click icon delete,
   - quick complete toggle.
 - Smart assistant + recommendations:
   - AI/logic-assisted create/update/delete/recurring plans,
-  - preview-before-save flows.
+  - preview-before-save flows,
   - manager-style commands for opening profile/options, histories, routines, calendar import, and smart pages,
+  - scoped optimize commands (`optimize today`, `optimize Friday`, or choose a timeframe from the optimize dialog),
+  - normal-day planning based on recurring calendar patterns, with preview before save,
+  - note-taking commands that find the best matching task and open a preview before saving the note,
   - calendar Q&A for day agendas, workload summaries, overdue/open/completed counts, and free-time checks,
-  - weather forecast answers by city or browser location using Open-Meteo.
+  - bulk date actions such as deleting all tasks for a date,
+  - weather forecast answers by city or browser location using Open-Meteo,
+  - recommendation filtering that avoids overlapping existing calendar tasks.
 - Smart Routine:
   - work + personal routine questionnaire,
   - preview and edit before save,
-  - saved routine profiles reusable from `Options -> Profile -> Profile tools`.
+  - saved routine profiles reusable from `Options -> Profile -> Profile tools`,
+  - searchable saved routine list.
 - Smart Statistics:
   - calendar workload and category charts,
-  - free time shown in the category pie,
+  - free time shown in the category pie (green) and work shown in black,
   - activity score trend,
   - grouped calendar movement showing how many times the same task was added,
   - AI API cost totals, daily cost chart, and cost by feature.
 - Work schedule protections:
   - routine generation enforces work coverage for selected workdays,
   - work segments split around breaks (e.g. `09:00-12:00`, break, `12:30-17:00`),
-  - optimize cannot move locked `Work Hours` / `Work Break` entries.
+  - optimize cannot move locked `Work Hours` / `Work Break` entries,
+  - task creation, assistant plans, imported events, recommendations, routine generation, and optimize all avoid protected work time when possible,
+  - if no safe non-work slot exists, the app warns before saving.
 - Smart schedule optimization:
+  - asks which day or timeframe to optimize before running from the main button,
+  - supports today, tomorrow, selected day, custom day, next 7 days, custom range, or whole calendar,
   - intelligently reschedules future and today's tasks to minimize travel time,
   - preserves all past tasks and their original scheduling,
   - groups tasks by location and optimizes within each group,
@@ -43,7 +57,11 @@ Taiskmaster is a React + Vite + TypeScript + Tailwind frontend with a Flask back
 - Activity insights:
   - score out of `100`,
   - daily retention keeps only newest score per day,
-  - score history in Profile tools.
+  - searchable score history in Profile tools.
+- Calendar import:
+  - paste or upload Google Calendar `.ics` exports,
+  - searchable parsed event preview before importing,
+  - imported events are checked against protected work time before being saved.
 - Header UX:
   - top-left icon opens section switcher:
     `Dashboard`, `Smart Routine`, `Smart Vacation`, `Smart Statistics`,
@@ -55,7 +73,9 @@ Taiskmaster is a React + Vite + TypeScript + Tailwind frontend with a Flask back
   - phone-safe options menu layout.
 - Data and auth:
   - JWT auth,
-  - SQLite models for users/tasks/messages/activity scores/routine profiles/history/AI usage.
+  - SQLite models for users/tasks/messages/activity scores/routine profiles/history/AI usage,
+  - `Task.note` is stored in local storage and backend task records,
+  - startup migration adds the `tasks.note` column for existing SQLite databases when needed.
 - AI usage tracking:
   - authenticated OpenAI calls record prompt/completion tokens when the provider returns usage,
   - estimated costs are based on built-in model pricing,
@@ -140,6 +160,9 @@ Expected response:
 - [src/components/Header.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/Header.tsx): icon-based section switcher + options menu
 - [src/components/MiniCalendar.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/MiniCalendar.tsx): dashboard mini-calendar and compact selected-day task summary
 - [src/components/TaskCard.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/TaskCard.tsx): clickable task blocks, time ranges, direct delete
+- [src/components/TaskDialog.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/TaskDialog.tsx): create/edit task dialog with description and note fields
+- [src/components/GoogleCalendarImportDialog.tsx](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/components/GoogleCalendarImportDialog.tsx): `.ics` upload/paste flow with searchable event preview
+- [src/lib/scheduleGuards.ts](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/lib/scheduleGuards.ts): protected work-time detection, conflict checks, and safe rescheduling helpers
 - [src/lib/taskStore.ts](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/lib/taskStore.ts): shared task state, auto-tags, local optimization rules
 - [backend/app/ai_usage.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/ai_usage.py): token usage capture and estimated API cost summaries
 - [backend/app/chat_api.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/chat_api.py): AI endpoints (assistant/recommendations/optimize/routine/insights) and guard rails

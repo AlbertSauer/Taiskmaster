@@ -31,6 +31,7 @@ class Task(db.Model):
     user_id = db.Column(db.String(36), db.ForeignKey("users.id"), nullable=False, index=True)
     title = db.Column(db.String(255), nullable=False)
     description = db.Column(db.Text, nullable=True)
+    note = db.Column(db.Text, nullable=True)
     date = db.Column(db.String(255), nullable=False)
     time = db.Column(db.String(255), nullable=True)
     duration = db.Column(db.Integer, nullable=True)

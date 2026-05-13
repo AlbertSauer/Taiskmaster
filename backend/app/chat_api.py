@@ -130,6 +130,7 @@ def _normalize_task_payload(task, source_text):
     title = str(task.get("title") or _extract_task_subject(source_text) or "New task").strip()
     task["title"] = title
     task["description"] = str(task.get("description") or _compact_description(title, source_text)).strip()[:140]
+    task["note"] = str(task.get("note") or "").strip() or None
     task["date"] = _normalize_iso_date(task.get("date"))
     task["priority"] = _normalize_priority(task.get("priority"), source_text)
     task["tags"] = task.get("tags") if isinstance(task.get("tags"), list) else []
@@ -318,34 +319,42 @@ def _minutes_to_time(value):
     return f"{hour:02d}:{minute:02d}"
 
 
-def _suggest_time_for_date(tasks, date, duration=60, preferred_time=None):
+def _suggest_time_for_date(tasks, date, duration=60, preferred_time=None, strict=False):
     duration = duration or 60
     occupied = []
     for task in tasks:
         if task.get("date") != date or not task.get("time"):
             continue
-        start = _time_to_minutes(task["time"])
-        task_duration = int(task.get("duration") or 60)
-        occupied.append((start, start + task_duration))
+        try:
+            start = _time_to_minutes(task["time"])
+            task_duration = int(task.get("duration") or 60)
+            occupied.append((start, start + task_duration))
+        except (TypeError, ValueError):
+            continue
 
     occupied.sort()
     day_start = 7 * 60
     day_end = 21 * 60
 
     if preferred_time:
-        preferred_start = _time_to_minutes(preferred_time)
-        if preferred_start < day_start:
-            preferred_start = day_start
-        if preferred_start + duration <= day_end and all(
-            preferred_start + duration <= start or preferred_start >= end
-            for start, end in occupied
-        ):
-            return preferred_time
+        try:
+            preferred_start = _time_to_minutes(preferred_time)
+            if preferred_start < day_start:
+                preferred_start = day_start
+            if preferred_start + duration <= day_end and all(
+                preferred_start + duration <= start or preferred_start >= end
+                for start, end in occupied
+            ):
+                return _minutes_to_time(preferred_start)
+        except (TypeError, ValueError):
+            pass
 
     for candidate in range(day_start, day_end - duration + 1, 30):
         if all(candidate + duration <= start or candidate >= end for start, end in occupied):
             return _minutes_to_time(candidate)
 
+    if strict:
+        return None
     return preferred_time or "18:00"
 
 
@@ -660,6 +669,29 @@ def _parse_completion(text, tasks):
 
 
 def _parse_deletion(text, tasks):
+    lowered = text.lower()
+    bulk_match = (
+        re.search(r"\b(delete|remove|cancel|clear)\b", lowered)
+        and re.search(r"\b(all|everything|every|tasks?|calendar)\b", lowered)
+        and re.search(r"\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|in\s+\d+\s+days?)\b", lowered)
+    )
+    if bulk_match:
+        target_date = _parse_date_reference(text) or _parse_relative_date(text)
+        matching_tasks = [task for task in tasks if task.get("date") == target_date]
+        if not matching_tasks:
+            return {
+                "reply": f"There are no tasks planned for {target_date} to delete.",
+                "actions": [],
+            }
+        return {
+            "reply": f"Prepared deletion for all {len(matching_tasks)} task{'s' if len(matching_tasks) != 1 else ''} on {target_date}.",
+            "actions": [
+                {"type": "delete_task", "task_id": task.get("id")}
+                for task in matching_tasks
+                if task.get("id")
+            ],
+        }
+
     match = re.match(
         r"^(?:delete|remove|cancel)\s+(?:task\s+)?(.+)$",
         text.strip(),
@@ -912,20 +944,49 @@ def _make_task(title, days_from_now, category, priority="medium", tags=None, tas
 
 def _fit_recommendation_times(recommendations, tasks):
     synthetic_tasks = list(tasks)
+    fitted_recommendations = []
     for recommendation in recommendations:
         suggested_task = recommendation.get("suggested_task")
         if not suggested_task:
+            fitted_recommendations.append(recommendation)
             continue
-        duration = suggested_task.get("duration") or 60
+        try:
+            duration = int(suggested_task.get("duration") or 60)
+        except (TypeError, ValueError):
+            duration = 60
         current_time = suggested_task.get("time")
-        suggested_task["time"] = _suggest_time_for_date(
-            synthetic_tasks,
-            suggested_task["date"],
-            duration=duration,
-            preferred_time=current_time,
-        )
+        original_date = suggested_task.get("date") or datetime.now().strftime("%Y-%m-%d")
+        scheduled_date = None
+        scheduled_time = None
+
+        for offset in range(0, 8):
+            try:
+                candidate_date = (
+                    datetime.strptime(original_date, "%Y-%m-%d") + timedelta(days=offset)
+                ).strftime("%Y-%m-%d")
+            except ValueError:
+                candidate_date = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
+
+            candidate_time = _suggest_time_for_date(
+                synthetic_tasks,
+                candidate_date,
+                duration=duration,
+                preferred_time=current_time if offset == 0 else None,
+                strict=True,
+            )
+            if candidate_time:
+                scheduled_date = candidate_date
+                scheduled_time = candidate_time
+                break
+
+        if not scheduled_date or not scheduled_time:
+            continue
+        suggested_task["date"] = scheduled_date
+        suggested_task["time"] = scheduled_time
+        suggested_task["duration"] = duration
         synthetic_tasks.append(suggested_task)
-    return recommendations
+        fitted_recommendations.append(recommendation)
+    return fitted_recommendations
 
 
 def _normalize_recommendation_item(item, fallback_days=1, tasks=None):
@@ -1001,6 +1062,7 @@ def _normalize_optimized_task(candidate, original):
             str(candidate.get("title") or original.get("title") or "Task"),
             source_text or str(original.get("title") or "Task"),
         ),
+        "note": str(candidate.get("note") or original.get("note") or "").strip() or None,
         "date": str(candidate.get("date") or original.get("date") or datetime.now().strftime("%Y-%m-%d")).strip(),
         "time": candidate.get("time") if candidate.get("time") not in ("", None) else original.get("time"),
         "duration": candidate.get("duration") if candidate.get("duration") is not None else original.get("duration"),
@@ -1607,6 +1669,7 @@ def chat():
         "Do not use generic names if the user already implied a specific task name. "
         "Rewrite task titles so they are short, clean, well-capitalized, grammatically correct, and specific to the activity. "
         "For every created task, generate a compact one-sentence description from the user's provided information. Keep it under 140 characters and do not invent sensitive details. "
+        "If the user asks to take, add, attach, or save a note for an existing task, return an update_task action with the note field and do not overwrite other fields. "
         "Choose the best fitting priority from exactly these values: very-low, low, medium, high, urgent. Use urgent only for truly time-sensitive or critical items. "
         "Correct obvious spelling and grammar issues in any created or renamed task title. "
         "If the input mentions a place, preserve it in the location field. "
@@ -1617,7 +1680,7 @@ def chat():
         "actions must be an array. "
         "Allowed action types are create_task, create_tasks, update_task, delete_task, and optimize_schedule. "
         "Only produce a create_task action when the user clearly asks to add or create a task. "
-        "For a create_task action, you MUST include a 'task' object inside the action containing the fields: title, description, date, time, duration, location, priority, tags, and completed. "
+        "For a create_task action, you MUST include a 'task' object inside the action containing the fields: title, description, note, date, time, duration, location, priority, tags, and completed. "
         "Use create_tasks when the user asks for a recurring plan like every Monday, every week, or similar repeated scheduling. "
         "For create_tasks, include a 'tasks' array of concrete task objects. "
         "Produce an update_task action when the user asks to reschedule, rename, reprioritize, complete, or otherwise modify an existing task. "
@@ -1843,12 +1906,13 @@ def optimize_schedule_ai():
             f"Current date: {datetime.now().strftime('%Y-%m-%d')}.\n"
             "Improve this task list for a scheduling app. Preserve each task id and calendar intent.\n"
             "Return JSON only: {\"tasks\": [...]}\n"
-            "For every task include: id, title, description, date, time, duration, location, priority, tags, completed.\n"
+            "For every task include: id, title, description, note, date, time, duration, location, priority, tags, completed.\n"
             "Rules:\n"
             "- Keep ids exactly unchanged.\n"
             "- Keep the number of tasks unchanged.\n"
             "- Keep date/time unless clearly invalid.\n"
             "- Rewrite title/description to be concise and useful.\n"
+            "- Preserve note exactly unless the input note is empty.\n"
             "- Choose priority from: very-low, low, medium, high, urgent.\n"
             "- Keep tags relevant and compact.\n\n"
             f"Input tasks JSON:\n{json.dumps(tasks, ensure_ascii=True)}"

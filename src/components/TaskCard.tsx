@@ -115,6 +115,12 @@ export const TaskCard = ({ task, onEdit, onDelete, onToggle }: Props) => {
             </p>
           )}
 
+          {task.note && (
+            <p className="mt-2 line-clamp-2 rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
+              Note: {task.note}
+            </p>
+          )}
+
           <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
             <span className={cn("inline-flex items-center gap-1.5", overdue && "text-destructive font-medium")}>
               <Calendar className="h-3.5 w-3.5" />

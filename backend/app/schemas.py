@@ -44,6 +44,7 @@ class UserInDB(BaseModel):
 class TaskBase(BaseModel):
     title: str
     description: Optional[str] = None
+    note: Optional[str] = None
     date: str
     time: Optional[str] = None
     duration: Optional[int] = None
@@ -60,6 +61,7 @@ class TaskCreate(TaskBase):
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
+    note: Optional[str] = None
     date: Optional[str] = None
     time: Optional[str] = None
     duration: Optional[int] = None

@@ -21,6 +21,7 @@ def create_task(task_in: schemas.TaskCreate, db: Session = Depends(get_db)):
         id=str(uuid.uuid4()),
         title=task_in.title,
         description=task_in.description,
+        note=task_in.note,
         date=task_in.date,
         time=task_in.time,
         duration=task_in.duration,

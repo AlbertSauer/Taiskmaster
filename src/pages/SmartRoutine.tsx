@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { useTasks } from "@/lib/taskStore";
+import { findProtectedWorkConflicts, moveTasksOutsideProtectedWork } from "@/lib/scheduleGuards";
 import type { Task } from "@/types/task";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
@@ -92,6 +93,13 @@ const SmartRoutine = () => {
     setWorkingDays((current) => current.includes(day) ? current.filter((d) => d !== day) : [...current, day]);
   };
 
+  const warnAboutProtectedWork = (warnings: string[]) => {
+    if (!warnings.length) return;
+    toast.warning("Adjusted routine around protected work time.", {
+      description: warnings.slice(0, 2).join(" "),
+    });
+  };
+
   const handleGenerate = async () => {
     if (!canSubmit) {
       toast.error("Please choose an end date and at least one working day.");
@@ -130,6 +138,7 @@ const SmartRoutine = () => {
             id: task.id,
             title: task.title,
             description: task.description,
+            note: task.note,
             date: task.date,
             time: task.time,
             duration: task.duration,
@@ -150,7 +159,9 @@ const SmartRoutine = () => {
         toast.error("No routine tasks returned.");
         return;
       }
-      setPreviewTasks(routineTasks);
+      const safeRoutine = moveTasksOutsideProtectedWork(routineTasks, [...tasks, ...routineTasks]);
+      warnAboutProtectedWork(safeRoutine.warnings);
+      setPreviewTasks(safeRoutine.tasks);
       setPreviewOpen(true);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Could not create routine.");
@@ -180,7 +191,15 @@ const SmartRoutine = () => {
         tasks.map((task) => `${task.title.trim().toLowerCase()}|${task.date}|${task.time || "00:00"}`),
       );
       const seen = new Set<string>();
-      const filtered = previewTasks.filter((task) => {
+      const safePreview = moveTasksOutsideProtectedWork(previewTasks, tasks);
+      warnAboutProtectedWork(safePreview.warnings);
+      const conflicts = findProtectedWorkConflicts(safePreview.tasks, tasks);
+      if (conflicts.length > 0) {
+        toast.warning("Some routine tasks still overlap protected work time.", {
+          description: `${conflicts.length} task${conflicts.length === 1 ? "" : "s"} could not be moved automatically.`,
+        });
+      }
+      const filtered = safePreview.tasks.filter((task) => {
         const key = signature(task);
         if (existingSignatures.has(key)) return false;
         if (seen.has(key)) return false;

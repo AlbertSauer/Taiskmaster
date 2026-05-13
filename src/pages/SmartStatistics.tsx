@@ -31,7 +31,7 @@ import { Header } from "@/components/Header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
-import { useTasks } from "@/lib/taskStore";
+import { useTasks, fetchTaskHistory } from "@/lib/taskStore";
 import type { Task } from "@/types/task";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
@@ -92,7 +92,7 @@ const parseTaskDate = (task: Task) => {
 
 const getTaskCategory = (task: Task) => {
   const tags = (task.tags ?? []).map((tag) => tag.toLowerCase());
-  const text = `${task.title} ${task.description ?? ""} ${task.location ?? ""}`.toLowerCase();
+  const text = `${task.title} ${task.description ?? ""} ${task.note ?? ""} ${task.location ?? ""}`.toLowerCase();
   if (tags.includes("work") || /\b(work|meeting|project|client|office)\b/.test(text)) return "Work";
   if (tags.includes("health") || /\b(gym|run|doctor|workout|health|therapy)\b/.test(text)) return "Health";
   if (tags.includes("learning") || /\b(study|course|read|learn|exam)\b/.test(text)) return "Learning";
@@ -168,6 +168,15 @@ const SmartStatistics = () => {
       setIsRefreshing(false);
     }
   }, [token]);
+
+  const loadTaskHistory = useCallback(async () => {
+    try {
+      const history = await fetchTaskHistory();
+      setTaskHistory(Array.isArray(history) ? history : []);
+    } catch {
+      setTaskHistory([]);
+    }
+  }, []);
 
   useEffect(() => {
     void fetchRemoteStats();

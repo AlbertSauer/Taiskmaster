@@ -4,6 +4,7 @@ export interface Task {
   id: string;
   title: string;
   description?: string;
+  note?: string;
   date: string; // ISO date (yyyy-mm-dd)
   time?: string; // HH:mm
   duration?: number; // Minutes

@@ -1,11 +1,24 @@
 import { useEffect, useState, useCallback } from "react";
 import { formatLocalDate } from "@/lib/dateTime";
+import { isProtectedWorkTask, rangesOverlap, timeToMinutes, minutesToTime, taskOverlapsProtectedWork } from "@/lib/scheduleGuards";
 import type { Task, SortMode } from "@/types/task";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
 const hasBackend = Boolean(API_BASE);
 const isAuthenticated = () => hasBackend && !!localStorage.getItem("authToken");
 const STORAGE_KEY = "taiskmaster.tasks.v1";
+const HISTORY_STORAGE_KEY = "taiskmaster.task_history.v1";
+
+type TaskHistoryAction = "created" | "updated" | "deleted";
+
+type TaskHistoryRecord = {
+  id: string;
+  task_id: string;
+  action: TaskHistoryAction;
+  title: string;
+  snapshot: Task;
+  created_at: string;
+};
 
 const getAuthHeaders = () => {
   const token = localStorage.getItem("authToken");
@@ -52,6 +65,7 @@ const normalizeTask = (task: PersistableTask): Task => ({
   id: task.id,
   title: task.title,
   description: task.description ?? undefined,
+  note: task.note ?? undefined,
   date: task.date,
   time: task.time ?? undefined,
   duration: task.duration ?? undefined,
@@ -145,6 +159,45 @@ const saveLocal = (tasks: Task[]) => {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks));
 };
 
+const loadLocalHistory = (): TaskHistoryRecord[] => {
+  try {
+    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as TaskHistoryRecord[]) : [];
+  } catch {
+    return [];
+  }
+};
+
+const saveLocalHistory = (history: TaskHistoryRecord[]) => {
+  localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history));
+};
+
+const logLocalTaskHistory = (task: Task, action: TaskHistoryAction) => {
+  const entry: TaskHistoryRecord = {
+    id: crypto.randomUUID(),
+    task_id: task.id,
+    action,
+    title: task.title,
+    snapshot: task,
+    created_at: new Date().toISOString(),
+  };
+  saveLocalHistory([entry, ...loadLocalHistory()]);
+  return entry;
+};
+
+export const fetchTaskHistory = async (): Promise<TaskHistoryRecord[]> => {
+  if (!isAuthenticated()) {
+    return loadLocalHistory();
+  }
+
+  const res = await fetch(`${API_BASE}/api/tasks/history`, {
+    headers: getAuthHeaders(),
+  });
+  if (!res.ok) throw new Error("Could not load task history");
+  const data = await res.json();
+  return Array.isArray(data.history) ? data.history : [];
+};
+
 const fetchTasks = async (): Promise<Task[]> => {
   if (!isAuthenticated()) {
     return loadLocal();
@@ -167,6 +220,7 @@ const createTask = async (task: Omit<Task, "id" | "createdAt">): Promise<Task> =
     const next: Task = { ...taskWithTags, id: crypto.randomUUID(), createdAt: new Date().toISOString() };
     const all = [...loadLocal(), next];
     saveLocal(all);
+    logLocalTaskHistory(next, "created");
     return next;
   }
 
@@ -187,6 +241,7 @@ const patchTask = async (id: string, patch: Partial<Task>): Promise<Task> => {
     saveLocal(updated);
     const patched = updated.find((t) => t.id === id);
     if (!patched) throw new Error("Task not found");
+    logLocalTaskHistory(patched, "updated");
     return patched;
   }
 
@@ -202,7 +257,10 @@ const patchTask = async (id: string, patch: Partial<Task>): Promise<Task> => {
 
 const deleteRemoteTask = async (id: string): Promise<void> => {
   if (!isAuthenticated()) {
-    saveLocal(loadLocal().filter((task) => task.id !== id));
+    const existing = loadLocal();
+    const taskToDelete = existing.find((task) => task.id === id);
+    if (taskToDelete) logLocalTaskHistory(taskToDelete, "deleted");
+    saveLocal(existing.filter((task) => task.id !== id));
     return;
   }
 
@@ -215,6 +273,7 @@ const deleteRemoteTask = async (id: string): Promise<void> => {
 
 const deleteAllRemoteTasks = async (tasks: Task[]): Promise<void> => {
   if (!isAuthenticated()) {
+    tasks.forEach((task) => logLocalTaskHistory(task, "deleted"));
     saveLocal([]);
     return;
   }
@@ -302,6 +361,25 @@ export const useTasks = () => {
 
   const replaceAll = useCallback(async (next: Task[]) => {
     if (!isAuthenticated()) {
+      const existing = loadLocal();
+      const existingById = new Map(existing.map((task) => [task.id, task]));
+      const nextById = new Set(next.map((task) => task.id));
+
+      next.forEach((task) => {
+        const current = existingById.get(task.id);
+        if (!current) {
+          logLocalTaskHistory(task, "created");
+        } else if (JSON.stringify(current) !== JSON.stringify(task)) {
+          logLocalTaskHistory(task, "updated");
+        }
+      });
+
+      existing.forEach((task) => {
+        if (!nextById.has(task.id)) {
+          logLocalTaskHistory(task, "deleted");
+        }
+      });
+
       saveLocal(next);
       persist(next);
       return;
@@ -335,11 +413,7 @@ export const useTasks = () => {
 // ---------- Sorting & optimization ----------
 
 const priorityWeight = { urgent: 0, high: 1, medium: 2, low: 3, "very-low": 4 } as const;
-const isLockedWorkTask = (task: Task) => {
-  const title = (task.title || "").trim().toLowerCase();
-  const tags = Array.isArray(task.tags) ? task.tags.map((tag) => String(tag).toLowerCase()) : [];
-  return title === "work hours" || title.startsWith("work break") || tags.includes("work") || tags.includes("work-break");
-};
+const isLockedWorkTask = isProtectedWorkTask;
 
 export const sortTasks = (tasks: Task[], mode: SortMode): Task[] => {
   const arr = [...tasks];
@@ -394,6 +468,7 @@ export const optimizeSchedule = (tasks: Task[]): Task[] => {
 
   for (const date of dates) {
     const dayTasks = byDate.get(date)!;
+    const scheduled: Task[] = [];
     const groups = new Map<string, Task[]>();
     dayTasks.forEach((t) => {
       const loc = t.location?.trim() || "—";
@@ -408,6 +483,38 @@ export const optimizeSchedule = (tasks: Task[]): Task[] => {
       return pa - pb;
     });
 
+    const workBlocks = dayTasks
+      .filter((task) => isLockedWorkTask(task) && task.time)
+      .map((task) => ({
+        task,
+        start: timeToMinutes(task.time) ?? 9 * 60,
+        duration: Math.max(15, task.duration ?? 60),
+      }))
+      .sort((a, b) => a.start - b.start);
+
+    const findOpenTime = (preferredStart: number, duration: number) => {
+      const dayStart = 6 * 60;
+      const dayEnd = 23 * 60;
+      const blockers = [...workBlocks, ...scheduled.map((task) => ({
+        task,
+        start: timeToMinutes(task.time) ?? 0,
+        duration: Math.max(15, task.duration ?? 60),
+      }))].filter((block) => block.task.time);
+
+      const canUse = (start: number) => {
+        if (start < dayStart || start + duration > dayEnd) return false;
+        return !blockers.some((block) => rangesOverlap(start, duration, block.start, block.duration));
+      };
+
+      for (let start = Math.max(dayStart, preferredStart); start <= dayEnd - duration; start += 15) {
+        if (canUse(start)) return start;
+      }
+      for (let start = dayStart; start < Math.max(dayStart, preferredStart); start += 15) {
+        if (canUse(start)) return start;
+      }
+      return preferredStart;
+    };
+
     let cursor = 8 * 60 + 30; // start the day at 08:30 in minutes
     for (const [, group] of orderedGroups) {
       group.sort((a, b) => priorityWeight[a.priority] - priorityWeight[b.priority]
@@ -416,22 +523,24 @@ export const optimizeSchedule = (tasks: Task[]): Task[] => {
         if (isLockedWorkTask(t)) {
           const existingTime = t.time ?? "09:00";
           const duration = Math.max(15, t.duration ?? 60);
-          const [hStr, mStr] = existingTime.split(":");
-          const h = Number(hStr);
-          const m = Number(mStr);
-          if (!Number.isNaN(h) && !Number.isNaN(m)) {
-            const end = h * 60 + m + duration;
-            if (end > cursor) cursor = end;
-          }
-          result.push({ ...t, time: existingTime, duration });
+          const start = timeToMinutes(existingTime);
+          if (start !== null && start + duration > cursor) cursor = start + duration;
+          const lockedTask = { ...t, time: existingTime, duration };
+          scheduled.push(lockedTask);
+          result.push(lockedTask);
           continue;
         }
         const duration = Math.max(15, t.duration ?? 60);
-        const h = Math.floor(cursor / 60).toString().padStart(2, "0");
-        const m = (cursor % 60).toString().padStart(2, "0");
-        const time = `${h}:${m}`;
-        cursor += duration;
-        result.push({ ...t, time, duration });
+        const start = findOpenTime(cursor, duration);
+        const time = minutesToTime(start);
+        cursor = start + duration;
+        const optimizedTask = { ...t, time, duration };
+        if (taskOverlapsProtectedWork(optimizedTask, dayTasks)) {
+          result.push({ ...t, time: t.time ?? time, duration });
+          continue;
+        }
+        scheduled.push(optimizedTask);
+        result.push(optimizedTask);
       }
       cursor += 15; // travel buffer between locations
     }
