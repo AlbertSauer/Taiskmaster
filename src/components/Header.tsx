@@ -35,12 +35,13 @@ interface Props {
 export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalendar, onDeleteAccount, onShowActivityScores, onShowTaskHistory, onShowRoutineProfiles, showActions = true }: Props) => {
   const { pathname } = useLocation();
   const { theme, resolvedTheme, setTheme } = useTheme();
-  const { logout, user, updateProfile } = useAuth();
+  const { logout, user, token, updateProfile } = useAuth();
   const navigate = useNavigate();
   const [styleMode, setStyleMode] = useState<"blue" | "green" | "pink" | "red" | "grey">("blue");
   const [mounted, setMounted] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
+  const [profileTestingKey, setProfileTestingKey] = useState(false);
   const [profileForm, setProfileForm] = useState({
     email: "",
     username: "",
@@ -162,6 +163,42 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
       toast.error(error instanceof Error ? error.message : "Could not update profile");
     } finally {
       setProfileSaving(false);
+    }
+  };
+
+  const handleTestApiKey = async () => {
+    if (!user || !token) return;
+    const typedKey = profileForm.openai_api_key.trim();
+    const shouldTestTypedKey = profileForm.change_openai_api_key || typedKey.length > 0;
+
+    if (shouldTestTypedKey && !typedKey) {
+      toast.error("Paste an API key to test.");
+      return;
+    }
+    if (!shouldTestTypedKey && !user.has_openai_api_key) {
+      toast.error("No saved API key to test.");
+      return;
+    }
+
+    try {
+      setProfileTestingKey(true);
+      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/auth/test-openai-key`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(shouldTestTypedKey ? { openai_api_key: typedKey } : {}),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.detail || "API key test failed.");
+      }
+      toast.success(data?.detail || "API key works.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "API key test failed.");
+    } finally {
+      setProfileTestingKey(false);
     }
   };
 
@@ -428,10 +465,26 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
                 value={profileForm.openai_api_key}
                 onChange={(e) => setProfileForm((current) => ({ ...current, openai_api_key: e.target.value }))}
                 placeholder={user?.has_openai_api_key ? "Personal key saved" : "Paste your API key"}
-                disabled={profileSaving || (Boolean(user?.has_openai_api_key) && !profileForm.change_openai_api_key)}
+                disabled={profileSaving || profileTestingKey || (Boolean(user?.has_openai_api_key) && !profileForm.change_openai_api_key)}
               />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="w-full justify-center"
+                onClick={handleTestApiKey}
+                disabled={
+                  profileSaving
+                  || profileTestingKey
+                  || (!user?.has_openai_api_key && !profileForm.openai_api_key.trim())
+                  || (profileForm.change_openai_api_key && !profileForm.openai_api_key.trim())
+                }
+              >
+                <KeyRound className="h-4 w-4" />
+                {profileTestingKey ? "Testing key..." : "Test API key"}
+              </Button>
               <p className="text-xs leading-relaxed text-muted-foreground">
-                Personal keys are tested before saving and used for your AI requests. Saved keys are not shown again; clear the field while changing to remove your saved key.
+                Test a pasted key before saving, or test your saved key without revealing it. Saved keys are not shown again; clear the field while changing to remove your saved key.
               </p>
             </div>
             <div className="space-y-2">

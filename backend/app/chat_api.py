@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import uuid
 from datetime import datetime, timedelta
 from random import Random
 from sqlalchemy import func
@@ -234,7 +235,7 @@ def _parse_time_range(text):
 
 def _parse_relative_date(text):
     base = datetime.now()
-    lowered = text.lower()
+    lowered = text.lower().replace("tommorow", "tomorrow")
     in_days_match = re.search(r"\bin\s+(\d+)\s+days?\b", lowered)
     from_now_match = re.search(r"\b(\d+)\s+days?\s+from\s+(?:now|today)\b", lowered)
 
@@ -252,7 +253,7 @@ def _parse_relative_date(text):
 
 
 def _parse_date_reference(text):
-    lowered = text.lower()
+    lowered = text.lower().replace("tommorow", "tomorrow")
     iso_match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", lowered)
     if iso_match:
         return iso_match.group(1)
@@ -283,7 +284,7 @@ def _parse_date_reference(text):
 
 
 def _has_explicit_date(text):
-    lowered = text.lower()
+    lowered = text.lower().replace("tommorow", "tomorrow")
     return bool(
         re.search(r"\b(today|tomorrow|next\s+week|this\s+week|this\s+month)\b", lowered)
         or re.search(r"\bin\s+\d+\s+days?\b", lowered)
@@ -855,7 +856,7 @@ def _parse_completion(text, tasks):
 
 
 def _parse_deletion(text, tasks):
-    lowered = text.lower()
+    lowered = text.lower().replace("tommorow", "tomorrow")
     has_date_scope = re.search(
         r"\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|in\s+\d+\s+days?)\b",
         lowered,
@@ -863,7 +864,7 @@ def _parse_deletion(text, tasks):
     if re.search(r"\b(delete|remove|cancel|clear)\b", lowered) and has_date_scope:
         target_date = _parse_date_reference(text) or _parse_relative_date(text)
         wants_whole_day = bool(re.search(r"\b(all|everything|every|tasks?|calendar)\b", lowered))
-        query = re.sub(r"\b(delete|remove|cancel|clear)\b", "", text, flags=re.IGNORECASE)
+        query = re.sub(r"\b(delete|remove|cancel|clear)\b", "", lowered, flags=re.IGNORECASE)
         query = re.sub(
             r"\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|in\s+\d+\s+days?)\b",
             "",
@@ -908,6 +909,133 @@ def _parse_deletion(text, tasks):
     return {
         "reply": f'I removed "{target.get("title", "task")}" from the plan.',
         "actions": [{"type": "delete_task", "task_id": target.get("id")}],
+    }
+
+
+def _normalized_task_title(title):
+    return re.sub(r"\s+", " ", str(title or "").strip().lower())
+
+
+def _is_routine_candidate(task):
+    if not isinstance(task, dict) or task.get("completed"):
+        return False
+    title = _normalized_task_title(task.get("title"))
+    if not title:
+        return False
+    tags = task.get("tags") if isinstance(task.get("tags"), list) else []
+    tag_text = " ".join(str(tag).lower() for tag in tags)
+    excluded = {"vacation", "holiday", "time off", "sick day"}
+    if title in excluded or any(value in tag_text for value in excluded):
+        return False
+    return True
+
+
+def _most_common(values, fallback=None):
+    counts = {}
+    for value in values:
+        if value in (None, ""):
+            continue
+        counts[value] = counts.get(value, 0) + 1
+    if not counts:
+        return fallback
+    return sorted(counts.items(), key=lambda item: (-item[1], str(item[0])))[0][0]
+
+
+def _parse_usual_routine_plan(text, tasks):
+    lowered = text.lower().replace("tommorow", "tomorrow")
+    if not re.search(r"\b(plan|create|build|make|schedule)\b", lowered):
+        return None
+    if not (
+        re.search(r"\b(normal|typical|usual|regular|average)\s+(day|routine|schedule)\b", lowered)
+        or re.search(r"\b(day|routine|schedule)\s+like\s+usual\b", lowered)
+    ):
+        return None
+
+    target_date = _parse_date_reference(lowered) or _parse_relative_date(lowered)
+    target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+    target_weekday = target_dt.weekday()
+    existing_target_tasks = [
+        task for task in tasks
+        if task.get("date") == target_date and not task.get("completed")
+    ]
+    existing_titles = {_normalized_task_title(task.get("title")) for task in existing_target_tasks}
+
+    source_tasks = []
+    for task in tasks:
+        if task.get("date") == target_date or not _is_routine_candidate(task):
+            continue
+        try:
+            datetime.strptime(str(task.get("date")), "%Y-%m-%d")
+        except (TypeError, ValueError):
+            continue
+        source_tasks.append(task)
+
+    same_weekday_tasks = [
+        task for task in source_tasks
+        if datetime.strptime(str(task.get("date")), "%Y-%m-%d").date().weekday() == target_weekday
+    ]
+    primary_source = same_weekday_tasks or source_tasks
+    if not primary_source:
+        return {
+            "reply": "I need a little more calendar history before I can infer your usual routine. Add a few repeated day-to-day tasks first, then ask me again.",
+            "actions": [],
+        }
+
+    grouped = {}
+    for task in primary_source:
+        key = _normalized_task_title(task.get("title"))
+        if not key or key in existing_titles:
+            continue
+        grouped.setdefault(key, []).append(task)
+
+    groups = [
+        group for group in grouped.values()
+        if same_weekday_tasks or len(group) >= 2
+    ]
+    groups.sort(
+        key=lambda group: (
+            _time_to_minutes(_normalize_task_time(_most_common([task.get("time") for task in group], "23:59"))) if group else 1439,
+            -len(group),
+        )
+    )
+
+    accepted = []
+    for group in groups[:10]:
+        sample = group[0]
+        common_time = _normalize_task_time(_most_common([task.get("time") for task in group], sample.get("time") or "09:00"))
+        common_duration = int(_most_common([task.get("duration") for task in group], sample.get("duration") or 60) or 60)
+        title = str(sample.get("title") or "Routine task").strip()
+        candidate = {
+            "title": title,
+            "description": sample.get("description") or "Part of your usual routine, based on similar calendar entries.",
+            "note": sample.get("note") or "",
+            "date": target_date,
+            "time": common_time,
+            "duration": common_duration,
+            "location": _most_common([task.get("location") for task in group], sample.get("location") or ""),
+            "priority": _normalize_priority(_most_common([task.get("priority") for task in group], sample.get("priority")), title),
+            "tags": list(dict.fromkeys([
+                str(tag)
+                for task in group
+                for tag in (task.get("tags") if isinstance(task.get("tags"), list) else [])
+            ]))[:6],
+            "completed": False,
+        }
+        open_time = _suggest_time_for_date(existing_target_tasks + accepted, target_date, common_duration, preferred_time=common_time, strict=True)
+        if not open_time:
+            continue
+        candidate["time"] = open_time
+        accepted.append(candidate)
+
+    if not accepted:
+        return {
+            "reply": f"{target_date} already has tasks blocking the usual routine I inferred. I did not prepare overlapping tasks.",
+            "actions": [],
+        }
+
+    return {
+        "reply": f"I prepared your usual routine for {target_date} based on your calendar patterns. Review the task window before saving.",
+        "actions": [{"type": "create_tasks", "tasks": accepted}],
     }
 
 
@@ -1072,6 +1200,10 @@ def _rule_based_response(payload):
     if not text:
         return {"reply": "Tell me what you'd like to do, and I'll help turn it into a clear plan.", "actions": []}
 
+    usual_routine_plan = _parse_usual_routine_plan(text, tasks)
+    if usual_routine_plan:
+        return usual_routine_plan
+
     app_command = _parse_app_command(text)
     if app_command:
         return app_command
@@ -1176,6 +1308,167 @@ def _build_history_context(messages):
     )
 
 
+def _is_feature_explanation_request(text):
+    lowered = str(text or "").lower()
+    return bool(
+        re.search(r"\b(how|why|what)\b.*\b(work|works|working|built|implemented|coded|logic|code)\b", lowered)
+        or re.search(r"\b(explain|describe|break down)\b.*\b(feature|logic|code|implementation|works?)\b", lowered)
+        or re.search(r"\b(logic wise|code wise|technically|under the hood)\b", lowered)
+    )
+
+
+def _build_feature_explanation_context():
+    return """
+App feature map for brief user-facing explanations:
+- Dashboard and task views: `src/pages/Index.tsx` owns the daily dashboard, selected date, mini calendar, recommendations, optimize previews, profile dialogs, and card/list task display. Task state comes from `src/lib/taskStore.ts`, which syncs with the Flask task API when a backend URL is configured and falls back to local storage otherwise.
+- Task create/edit window: `src/components/TaskDialog.tsx` opens for new tasks, task edits, and assistant previews. Assistant actions are previewed before save; direct mutations happen only after the user confirms or saves.
+- Assistant UI: `src/components/AssistantPanel.tsx` sends messages to `/api/chat`, executes returned `app_command` actions, opens app areas, and shows preview windows for create/update/create_tasks actions. It also has a local Lite fallback for supported commands if the backend is unreachable.
+- Assistant backend: `backend/app/chat_api.py` saves authenticated user messages first, sends the request to OpenAI with task/history context, normalizes returned actions, saves assistant replies with structured `analysis_data`, and returns JSON `{ reply, actions }`. If the profile key is missing or fails, supported commands use Lite parsing; full free-form interpretation requires the API key.
+- Chat storage: `backend/app/models.py` defines `Conversation` and `Message`. Assistant chat metadata is stored in `messages.analysis_data` with fields like `source`, `kind`, `status`, `actions`, and `request_message_id`.
+- API keys and profile: `src/components/Header.tsx` contains Profile Options. `backend/app/auth.py` stores the user's OpenAI key, tests keys before saving, and exposes `/api/auth/test-openai-key` for the Test API key button.
+- Tasks and history: `backend/app/tasks_api.py` handles task CRUD and writes task history. `src/lib/taskStore.ts` exposes add/update/delete/complete helpers to the UI.
+- Recommendations: `backend/app/chat_api.py` `/recommendations` creates non-overlapping suggested tasks, mixing fallback ideas with AI refinement when a working key exists.
+- Optimize schedule: `src/pages/Index.tsx` opens optimize scope/date flows. `backend/app/chat_api.py` `/optimize-schedule` asks AI to improve task timing and returns previewable task updates; app-side guards avoid work-time conflicts when possible.
+- Smart Routine: `src/pages/SmartRoutine.tsx` collects routine preferences. `backend/app/chat_api.py` `/routine-plan` generates routine tasks, enforces work-hour rules, adds sleep blocks, prefers workout time, dedupes overlaps, and saves a routine profile.
+- Smart Statistics: `src/pages/SmartStatistics.tsx` combines tasks, task history, activity scores, and AI usage. `backend/app/chat_api.py` exposes activity score and AI usage routes; `backend/app/ai_usage.py` estimates API cost.
+- Calendar import and delete calendar: `src/components/GoogleCalendarImportDialog.tsx` parses calendar uploads into preview tasks. Profile tools in `src/components/Header.tsx` expose import and delete-calendar actions.
+- Weather: The assistant uses an app command handled in `src/components/AssistantPanel.tsx`, calling Open-Meteo/geocoding from the browser for forecast summaries.
+Explanation style rules:
+- Keep answers brief: usually 3-6 short bullets or 1 short paragraph.
+- Explain both user logic and code location when asked "code wise".
+- Do not include long code snippets unless the user explicitly asks.
+- For explanation requests, return no actions.
+""".strip()
+
+
+def _get_assistant_conversation():
+    current_user = getattr(request, "current_user", None)
+    if current_user is None:
+        return None
+
+    from app.models import Conversation, db
+
+    conversation = (
+        db.session.query(Conversation)
+        .filter(
+            Conversation.user_id == current_user.id,
+            Conversation.use_case == "assistant",
+        )
+        .order_by(Conversation.updated_at.desc())
+        .first()
+    )
+    if conversation is None:
+        conversation = Conversation(
+            id=str(uuid.uuid4()),
+            user_id=current_user.id,
+            title="Assistant Chat",
+            use_case="assistant",
+        )
+        db.session.add(conversation)
+        db.session.flush()
+    return conversation
+
+
+def _persist_chat_message(role, content, analysis_data=None):
+    if not str(content or "").strip():
+        return None
+
+    try:
+        from app.models import Message, db
+
+        conversation = _get_assistant_conversation()
+        if conversation is None:
+            return None
+
+        message = Message(
+            id=str(uuid.uuid4()),
+            conversation_id=conversation.id,
+            role=role,
+            content=str(content).strip(),
+            analysis_data=analysis_data or {},
+        )
+        db.session.add(message)
+        conversation.updated_at = datetime.utcnow()
+        db.session.commit()
+        return message.id
+    except Exception:
+        try:
+            from app.models import db
+            db.session.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def _persist_user_input(user_input, source="assistant"):
+    return _persist_chat_message(
+        "user",
+        user_input,
+        {
+            "source": source,
+            "kind": "assistant_input",
+            "status": "received",
+        },
+    )
+
+
+def _persist_assistant_reply(assistant_reply, actions=None, source="assistant", request_message_id=None, status="ok", error=None):
+    safe_actions = actions if isinstance(actions, list) else []
+    analysis_data = {
+        "source": source,
+        "kind": "assistant_response",
+        "status": status,
+        "actions": safe_actions,
+        "request_message_id": request_message_id,
+    }
+    if error:
+        analysis_data["error"] = str(error)
+    return _persist_chat_message(
+        "assistant",
+        str(assistant_reply or "").strip() or "No assistant reply.",
+        analysis_data,
+    )
+
+
+def _jsonify_chat_response(reply, actions=None, source="assistant", request_message_id=None, status="ok", error=None):
+    safe_actions = actions if isinstance(actions, list) else []
+    _persist_assistant_reply(reply, safe_actions, source, request_message_id, status, error)
+    return jsonify({"reply": reply, "actions": safe_actions}), 200
+
+
+@chat_bp.post("/log")
+def log_chat_messages():
+    _request_openai_api_key()
+    payload = request.get_json(silent=True) or {}
+    messages = payload.get("messages", [])
+    if not isinstance(messages, list):
+        messages = []
+
+    saved_ids = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+        analysis_data = message.get("analysis_data")
+        if not isinstance(analysis_data, dict):
+            analysis_data = {}
+        analysis_data = {
+            **analysis_data,
+            "source": analysis_data.get("source") or "frontend",
+            "kind": analysis_data.get("kind") or "assistant_ui_message",
+        }
+        saved_id = _persist_chat_message(role, content, analysis_data)
+        if saved_id:
+            saved_ids.append(saved_id)
+
+    return jsonify({"saved": len(saved_ids), "ids": saved_ids}), 200
+
+
 def _has_any(tasks, keywords):
     combined = " ".join(
         " ".join(
@@ -1194,7 +1487,13 @@ def _has_any(tasks, keywords):
 
 
 def _make_task(title, days_from_now, category, priority="medium", tags=None, tasks=None, duration=60, preferred_time=None, date_override=None):
-    date = date_override or (datetime.now() + timedelta(days=days_from_now)).strftime("%Y-%m-%d")
+    today = datetime.now().date()
+    date = date_override or (today + timedelta(days=days_from_now)).strftime("%Y-%m-%d")
+    try:
+        if datetime.strptime(date, "%Y-%m-%d").date() < today:
+            date = today.strftime("%Y-%m-%d")
+    except ValueError:
+        date = today.strftime("%Y-%m-%d")
     scheduled_time = _suggest_time_for_date(tasks or [], date, duration=duration, preferred_time=preferred_time)
     return {
         "title": title,
@@ -1208,13 +1507,24 @@ def _make_task(title, days_from_now, category, priority="medium", tags=None, tas
     }
 
 
+def _safe_recommendation_target_date(value):
+    today = datetime.now().date()
+    if isinstance(value, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d").date()
+            return max(parsed, today).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return today.strftime("%Y-%m-%d")
+
+
 def _fit_recommendation_times(recommendations, tasks):
     synthetic_tasks = list(tasks)
     fitted_recommendations = []
+    today = datetime.now().date()
     for recommendation in recommendations:
         suggested_task = recommendation.get("suggested_task")
         if not suggested_task:
-            fitted_recommendations.append(recommendation)
             continue
         try:
             duration = int(suggested_task.get("duration") or 60)
@@ -1222,16 +1532,15 @@ def _fit_recommendation_times(recommendations, tasks):
             duration = 60
         current_time = suggested_task.get("time")
         original_date = suggested_task.get("date") or datetime.now().strftime("%Y-%m-%d")
+        try:
+            start_date = max(datetime.strptime(original_date, "%Y-%m-%d").date(), today)
+        except ValueError:
+            start_date = today
         scheduled_date = None
         scheduled_time = None
 
-        for offset in range(0, 8):
-            try:
-                candidate_date = (
-                    datetime.strptime(original_date, "%Y-%m-%d") + timedelta(days=offset)
-                ).strftime("%Y-%m-%d")
-            except ValueError:
-                candidate_date = (datetime.now() + timedelta(days=offset)).strftime("%Y-%m-%d")
+        for offset in range(0, 14):
+            candidate_date = (start_date + timedelta(days=offset)).strftime("%Y-%m-%d")
 
             candidate_time = _suggest_time_for_date(
                 synthetic_tasks,
@@ -1253,6 +1562,16 @@ def _fit_recommendation_times(recommendations, tasks):
         synthetic_tasks.append(suggested_task)
         fitted_recommendations.append(recommendation)
     return fitted_recommendations
+
+
+def _recommendation_has_future_task(recommendation):
+    suggested = recommendation.get("suggested_task") if isinstance(recommendation, dict) else None
+    if not isinstance(suggested, dict):
+        return False
+    try:
+        return datetime.strptime(str(suggested.get("date")), "%Y-%m-%d").date() >= datetime.now().date()
+    except (TypeError, ValueError):
+        return False
 
 
 def _normalize_recommendation_item(item, fallback_days=1, tasks=None):
@@ -1943,29 +2262,57 @@ def chat():
     payload = request.get_json(silent=True) or {}
     user_input = payload.get("input", "")
     api_key = _request_openai_api_key()
-    rule_based = _rule_based_response(payload)
-    if rule_based and rule_based.get("actions") and _should_use_rule_based_before_ai(rule_based):
-        return jsonify(rule_based), 200
+    request_message_id = _persist_user_input(user_input)
+    explanation_request = _is_feature_explanation_request(user_input)
+    rule_based = None if explanation_request else _rule_based_response(payload)
 
     if not api_key:
+        if explanation_request:
+            reply = (
+                "Feature explanations use the live AI so I can explain the app logic and code structure clearly. "
+                "Please add and test your API key in Profile Options first."
+            )
+            return _jsonify_chat_response(
+                reply,
+                [],
+                source="missing_api_key",
+                request_message_id=request_message_id,
+                status="missing_api_key",
+            )
         if rule_based:
-            return jsonify(rule_based), 200
-        return jsonify({
-            "reply": "I'm having trouble reaching the live AI right now, but I can still help with planning, adding tasks, and basic schedule questions.",
-            "actions": [],
-        }), 200
+            return _jsonify_chat_response(
+                rule_based.get("reply", "I prepared this in Lite mode for you to review."),
+                rule_based.get("actions", []),
+                source="lite",
+                request_message_id=request_message_id,
+                status="missing_api_key",
+            )
+        reply = (
+            "Full AI manager needs a working API key in Profile Options. "
+            "Add and test your API key there, or use Lite mode for basic planning commands."
+        )
+        return _jsonify_chat_response(
+            reply,
+            [],
+            source="missing_api_key",
+            request_message_id=request_message_id,
+            status="missing_api_key",
+        )
 
     tasks = payload.get("tasks", []) or []
     messages = payload.get("messages", []) or []
 
-    client = OpenAI(api_key=api_key)
+    client = OpenAI(api_key=api_key, timeout=12.0)
     task_context = _build_task_context(tasks)
     history_context = _build_history_context(messages)
+    feature_context = _build_feature_explanation_context() if explanation_request else ""
     instructions = (
         "You are an expert scheduling assistant for a task manager app. "
         "Be excellent at prioritizing, time-blocking, sequencing work, and turning vague plans into realistic next steps. "
         "Use the provided task list and conversation history as context and answer clearly and concisely. "
         "Your tone should be warm, motivating, and practical. "
+        "If the user asks how a feature works logic-wise, code-wise, technically, or under the hood, answer as a brief product-and-code explainer using the provided app feature map. "
+        "For feature explanation requests, do not create, update, delete, optimize, or open anything; return an empty actions array. "
         "When the user uses relative dates like today, tomorrow, or in 3 days, calculate them exactly from the provided current date. "
         "If the user asks you to add or change a plan but key details are missing, ask a short follow-up question before taking action. "
         "Examples of missing details include date, time, and location when those details matter. "
@@ -2005,6 +2352,8 @@ def chat():
     )
     prompt = (
         f"Current date: {datetime.now().strftime('%Y-%m-%d')}.\n"
+        f"Feature explanation request: {'yes' if explanation_request else 'no'}.\n"
+        f"App feature map:\n{feature_context or '- Only needed for feature explanation requests'}\n\n"
         f"Conversation history:\n{history_context or '- No previous messages'}\n\n"
         f"Current tasks:\n{task_context if task_context else '- No tasks yet'}\n\n"
             f'User: {user_input}'
@@ -2026,17 +2375,40 @@ def chat():
         content = completion.choices[0].message.content or "{}"
         parsed = json.loads(content)
         actions = _normalize_actions(parsed.get("actions", []), user_input)
-        return jsonify({
-            "reply": parsed.get("reply", "I couldn't form a reply right now."),
-            "actions": actions,
-        }), 200
+        return _jsonify_chat_response(
+            parsed.get("reply", "I couldn't form a reply right now."),
+            actions,
+            source="openai",
+            request_message_id=request_message_id,
+        )
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({
-            "reply": "I'm having trouble reaching the live AI right now, but I can still help with planning, adding tasks, and basic schedule questions.",
-            "actions": [],
-        }), 200
+        if rule_based and not explanation_request:
+            return _jsonify_chat_response(
+                rule_based.get("reply", "I prepared this in Lite mode for you to review."),
+                rule_based.get("actions", []),
+                source="lite",
+                request_message_id=request_message_id,
+                status="api_error",
+                error=e,
+            )
+        if explanation_request:
+            reply = (
+                "I need the live AI to explain feature logic and code structure. "
+                "Your saved API key did not work, so please update and test it in Profile Options."
+            )
+        else:
+            reply = (
+                "The saved API key did not work for the full AI manager. "
+                "Please update and test your API key in Profile Options, or use Lite mode for basic planning commands."
+            )
+        return _jsonify_chat_response(
+            reply,
+            [],
+            source="api_error",
+            request_message_id=request_message_id,
+            status="api_error",
+            error=e,
+        )
 
 
 @chat_bp.post("/recommendations")
@@ -2047,8 +2419,7 @@ def recommendations():
     excluded_titles = {title.lower() for title in payload.get("exclude_titles", []) or []}
     refresh_token = str(payload.get("refresh_token", ""))
 
-    if not isinstance(target_date, str) or not re.match(r"^\d{4}-\d{2}-\d{2}$", target_date):
-        target_date = datetime.now().strftime("%Y-%m-%d")
+    target_date = _safe_recommendation_target_date(target_date)
 
     base_pool = [
         {
@@ -2156,9 +2527,10 @@ def recommendations():
                 "Return JSON with a recommendations array of 3 fresh ideas. "
                 "Each item must include title, reason, category, and suggested_task. "
                 "Every suggested_task must include a compact description and one priority value from very-low, low, medium, high, urgent. "
-                "All suggested_task dates must be exactly the target date. "
+                "All suggested_task dates must be exactly the target date, and the target date is guaranteed to be today or in the future. "
+                "Never recommend tasks in the past. "
                 "Avoid repeating excluded titles or near-duplicates. "
-                "Choose suggested_task times that fit around the current task list when possible and avoid overlapping existing tasks or other recommendations. "
+                "Choose suggested_task times that fit around the current task list and avoid overlapping existing tasks, plans, or other recommendations. "
                 "Valid categories: schedule, family, sports, health, recovery, personal, hobbies, meditation, reading, studying, fun."
             )
             completion = client.chat.completions.create(
@@ -2195,6 +2567,10 @@ def recommendations():
     recommendations = [recommendation for recommendation in recommendations if recommendation]
     recommendations = _pin_recommendations_to_date(recommendations, target_date)
     recommendations = _fit_recommendation_times(recommendations[:3], tasks)
+    recommendations = [
+        recommendation for recommendation in recommendations
+        if _recommendation_has_future_task(recommendation)
+    ][:3]
     return jsonify({"recommendations": recommendations}), 200
 
 

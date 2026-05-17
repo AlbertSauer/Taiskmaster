@@ -12,20 +12,29 @@ The app is designed around a daily dashboard and an assistant-driven workflow. U
   - Create, edit, delete, complete, and search tasks.
   - Task descriptions and notes are stored in local state and backend records.
   - Dashboard can switch between card/block view and compact list view.
+  - Recommendations avoid past dates and are re-fit into open, non-overlapping calendar slots before being shown.
 
 - Assistant:
   - Sends user input to the backend API by default.
   - Converts natural language into structured commands such as `create_task`, `create_tasks`, `update_task`, `delete_task`, and `app_command`.
-  - Supports complex phrases like "delete work tomorrow" and "plan something some day next week".
+  - Saves authenticated assistant chats in the backend `conversations` and `messages` tables so they can be inspected in a SQLite DB browser.
+  - Saves the user message first, then saves the assistant answer with source, status, returned actions, and related metadata.
+  - Supports complex phrases like "delete all tomorrow", "delete work tomorrow", "plan the usual routine for tomorrow", and "plan something some day next week".
+  - Falls back to Lite mode when the live AI key is missing or fails, and still shows previewable task windows for supported planning and delete commands.
+  - Uses the live AI to briefly explain how app features work logic-wise and code-wise, using a backend feature map of the main files and flows.
   - Can open profile/options, histories, routines, statistics, calendar import, Smart Routine, Smart Vacation, and optimize dialogs.
   - Uses English-only voice options and chooses the best available English browser voice for spoken replies.
   - Example prompts:
     - `Tell me what is planned tomorrow`
+    - `Delete all tomorrow`
     - `Delete work tomorrow`
+    - `Plan the usual routine for tomorrow`
     - `Plan something some day next week`
     - `Plan some activity once a week for a month`
     - `Tell me about my activity score`
     - `Optimize today`
+    - `How does Smart Statistics work code wise?`
+    - `Explain how the routine feature works logic wise`
 
 - Smart Routine:
   - Builds routine plans from a questionnaire.
@@ -43,7 +52,7 @@ The app is designed around a daily dashboard and an assistant-driven workflow. U
 - Safety and profile:
   - JWT authentication.
   - Password changes require current password, new password, and confirmation.
-  - Personal OpenAI API keys are entered in Profile options, tested before saving, and never returned to the frontend.
+  - Personal OpenAI API keys are entered in Profile options, can be tested on demand, are tested before saving, and are never returned to the frontend.
   - Existing SQLite databases are migrated on startup for new task note and user API-key fields.
 
 ## Run The App
@@ -91,9 +100,33 @@ The backend no longer uses an API key from code or `.env`. Add the key inside th
 1. Register or log in.
 2. Open `Options -> Profile`.
 3. Paste the key into `OpenAI API key`.
-4. Save. The app tests the key before storing it.
+4. Use `Test API key` to verify a pasted key before saving.
+5. Save. The app tests the key again before storing it.
 
-Without a saved profile key, local and rule-based assistant features still work, but live AI interpretation needs the saved key.
+If a key is already saved, `Test API key` checks the saved key without revealing it. Without a working profile key, Lite mode still handles supported app-manager commands such as bulk delete, routine planning from calendar patterns, calendar summaries, navigation, and basic scheduling previews. Full free-form AI interpretation and feature/code explanations need a working saved key.
+
+## Local Database
+
+The default SQLite database is created at:
+
+```text
+backend/instance/dev.db
+```
+
+Assistant chats are saved for authenticated users in:
+
+- `conversations`
+- `messages`
+
+Assistant message command metadata, including returned app actions, is stored in the `messages.analysis_data` column.
+
+Useful `messages.analysis_data` fields:
+
+- `source`: `openai`, `lite`, `missing_api_key`, `api_error`, or `frontend`.
+- `kind`: message type, such as `assistant_input`, `assistant_response`, or `assistant_preview_response`.
+- `status`: processing state, such as `received`, `ok`, `missing_api_key`, or `api_error`.
+- `actions`: structured app commands returned by the assistant.
+- `request_message_id`: links an assistant reply to the user message that caused it.
 
 ## Manual Start
 
@@ -129,7 +162,7 @@ Current known lint note: `src/hooks/useAuth.tsx` has the existing React Fast Ref
 
 ## Project Map
 
-- `src/pages/Index.tsx`: dashboard, task views, optimize previews, recommendation dialogs, activity dialogs.
+- `src/pages/Index.tsx`: dashboard, task views, optimize previews, recommendation dialogs, activity dialogs, and frontend recommendation safety filters.
 - `src/components/AssistantPanel.tsx`: assistant UI, voice controls, API command execution, local fallback.
 - `src/components/Header.tsx`: section switcher, options menu, profile tools.
 - `src/components/TaskDialog.tsx`: task create/edit dialog.
@@ -138,8 +171,8 @@ Current known lint note: `src/hooks/useAuth.tsx` has the existing React Fast Ref
 - `src/pages/SmartStatistics.tsx`: statistics dashboards and AI cost views.
 - `src/lib/taskStore.ts`: shared task state and task API sync.
 - `src/lib/scheduleGuards.ts`: work-time and overlap protection helpers.
-- `backend/app/auth.py`: auth, profile updates, password and API-key handling.
-- `backend/app/chat_api.py`: assistant, recommendations, optimization, activity insights, routines, usage routes.
+- `backend/app/auth.py`: auth, profile updates, password handling, and API-key save/test routes.
+- `backend/app/chat_api.py`: assistant, non-overlapping recommendations, optimization, activity insights, routines, usage routes.
 - `backend/app/tasks_api.py`: backend task CRUD and task history.
 - `backend/app/models.py`: SQLite models.
 - `backend/app/ai_usage.py`: AI token and cost tracking.

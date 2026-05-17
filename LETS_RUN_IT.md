@@ -1,6 +1,6 @@
 # LETS RUN IT
 
-Fast startup instructions for the Taiskmaster presentation version.
+Fast startup instructions for Taiskmaster.
 
 ## One Terminal Fast Start
 

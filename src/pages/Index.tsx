@@ -152,9 +152,16 @@ const recommendationOverlapsTasks = (
   });
 };
 
+const recommendationHasFutureTask = (recommendation: Recommendation) => {
+  const suggested = recommendation.suggested_task;
+  if (!suggested?.date) return false;
+  return suggested.date >= isoDate(new Date());
+};
+
 const removeOverlappingRecommendations = (items: Recommendation[], existingTasks: Task[]) => {
   const accepted: Recommendation[] = [];
   for (const item of items) {
+    if (!recommendationHasFutureTask(item)) continue;
     if (!recommendationOverlapsTasks(item, existingTasks, accepted)) {
       accepted.push(item);
     }

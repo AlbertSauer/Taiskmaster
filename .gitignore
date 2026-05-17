@@ -20,6 +20,11 @@ backend/.env
 # Python
 __pycache__/
 *.py[cod]
+.venv/
+backend/.venv/
+*.db
+backend/*.db
+backend/instance/*.db
 
 # Editor directories and files
 .vscode/*

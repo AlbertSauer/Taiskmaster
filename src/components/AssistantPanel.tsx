@@ -181,7 +181,7 @@ const parseRelativeDate = (text: string) => {
     date.setDate(date.getDate() + Number(inDaysMatch[1]));
   } else if (fromNowMatch) {
     date.setDate(date.getDate() + Number(fromNowMatch[1]));
-  } else if (/tomorrow/.test(lowered)) {
+  } else if (/tomorrow|tommorow/.test(lowered)) {
     date.setDate(date.getDate() + 1);
   }
 
@@ -199,7 +199,7 @@ const parseDateReference = (text: string) => {
     date.setDate(date.getDate() + Number(inDaysMatch[1]));
     return formatLocalDate(date);
   }
-  if (/\btomorrow\b/.test(lowered)) {
+  if (/\b(tomorrow|tommorow)\b/.test(lowered)) {
     date.setDate(date.getDate() + 1);
     return formatLocalDate(date);
   }
@@ -257,7 +257,7 @@ const eachDateInRange = (start: Date, end: Date) => {
   return dates;
 };
 
-const dateReferencePattern = /\b(today|tomorrow|next\s+week|this\s+week|this\s+month|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|in\s+\d+\s+days?)\b/i;
+const dateReferencePattern = /\b(today|tomorrow|tommorow|next\s+week|this\s+week|this\s+month|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|in\s+\d+\s+days?)\b/i;
 
 const formatCalendarTask = (task: Task) =>
   `• ${task.time ? `${task.time} — ` : ""}${task.title}${task.location ? ` (${task.location})` : ""}`;
@@ -432,7 +432,10 @@ const findOpenTimeForNormalDay = (
 const buildNormalDayPlan = (input: string, tasks: Task[]): AssistantResult | null => {
   const lowered = input.toLowerCase();
   if (!/\b(plan|create|build|make|schedule)\b/.test(lowered)) return null;
-  if (!/\b(normal|typical|usual|regular|average)\s+day\b/.test(lowered)) return null;
+  if (
+    !/\b(normal|typical|usual|regular|average)\s+(day|routine|schedule)\b/.test(lowered) &&
+    !/\b(day|routine|schedule)\s+like\s+usual\b/.test(lowered)
+  ) return null;
 
   const targetDate = parseDateReference(input);
   const target = new Date(`${targetDate}T00:00:00`);
@@ -981,6 +984,26 @@ const runLocalFallbackAssistant = async (
   return { reply: "I’m not fully sure what you want to change yet. Tell me the task or plan, plus the day, time, or place if you know them, and I’ll sort it out with you." };
 };
 
+const logAssistantMessages = async (
+  authToken: string | null,
+  messages: Array<{ role: Message["role"]; content: string; analysis_data?: Record<string, unknown> }>,
+) => {
+  if (!API_BASE || !authToken || messages.length === 0) return;
+
+  try {
+    await fetch(`${API_BASE}/api/chat/log`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${authToken}`,
+      },
+      body: JSON.stringify({ messages }),
+    });
+  } catch {
+    // The visible assistant should keep working even if audit logging fails.
+  }
+};
+
 const weatherCodeLabel = (code: number) => {
   if (code === 0) return "clear sky";
   if ([1, 2, 3].includes(code)) return "partly cloudy";
@@ -1317,8 +1340,20 @@ const runAssistant = async (
       return { reply: data.reply || "I couldn't get an answer right now.", actions: data.actions };
     } catch {
       const managerResult = await runManagerIntent(input, ctx, controls, authToken);
-      if (managerResult) return managerResult;
-      return runLocalFallbackAssistant(input, ctx);
+      const result = managerResult ?? await runLocalFallbackAssistant(input, ctx);
+      void logAssistantMessages(authToken, [
+        {
+          role: "user",
+          content: input,
+          analysis_data: { source: "frontend", kind: "assistant_input", status: "frontend_fallback" },
+        },
+        {
+          role: "assistant",
+          content: result.reply,
+          analysis_data: { source: "frontend", kind: "assistant_response", status: "frontend_fallback" },
+        },
+      ]);
+      return result;
     }
   }
 
@@ -1593,6 +1628,18 @@ export const AssistantPanel = ({
         };
         setPendingProposal(null);
         setMessages((m) => [...m, reply]);
+        void logAssistantMessages(token, [
+          {
+            role: "user",
+            content: trimmed,
+            analysis_data: { source: "frontend", kind: "assistant_confirmation" },
+          },
+          {
+            role: "assistant",
+            content: replyText,
+            analysis_data: { source: "frontend", kind: "assistant_confirmation_response" },
+          },
+        ]);
         speakAssistantReply(replyText);
         toast.success("Tasks updated");
         return;
@@ -1607,6 +1654,18 @@ export const AssistantPanel = ({
         };
         setPendingProposal(null);
         setMessages((m) => [...m, reply]);
+        void logAssistantMessages(token, [
+          {
+            role: "user",
+            content: trimmed,
+            analysis_data: { source: "frontend", kind: "assistant_cancel" },
+          },
+          {
+            role: "assistant",
+            content: replyText,
+            analysis_data: { source: "frontend", kind: "assistant_cancel_response" },
+          },
+        ]);
         speakAssistantReply(replyText);
         return;
       }
@@ -1632,6 +1691,11 @@ export const AssistantPanel = ({
             };
             setPendingProposal(null);
             setMessages((m) => [...m, reply]);
+            void logAssistantMessages(token, [{
+              role: "assistant",
+              content: replyText,
+              analysis_data: { source: "frontend", kind: "assistant_display_response" },
+            }]);
             speakAssistantReply(replyText);
             return;
           }
@@ -1667,6 +1731,11 @@ export const AssistantPanel = ({
           };
           setPendingProposal(null);
           setMessages((m) => [...m, reply]);
+          void logAssistantMessages(token, [{
+            role: "assistant",
+            content: replyText,
+            analysis_data: { source: "frontend", kind: "assistant_preview_response" },
+          }]);
           speakAssistantReply(replyText);
           return;
         }
@@ -1679,6 +1748,11 @@ export const AssistantPanel = ({
         };
         setPendingProposal({ actions: actionableActions, summary });
         setMessages((m) => [...m, reply]);
+        void logAssistantMessages(token, [{
+          role: "assistant",
+          content: summary,
+          analysis_data: { source: "frontend", kind: "assistant_preview_response" },
+        }]);
         speakAssistantReply("I have a plan ready. Please confirm if you want me to apply it.");
         return;
       }

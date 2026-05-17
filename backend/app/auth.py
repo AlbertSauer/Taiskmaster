@@ -149,6 +149,49 @@ def get_current_user():
     }), 200
 
 
+@auth_bp.post('/test-openai-key')
+@token_required
+def test_current_openai_key():
+    """Test a provided or saved OpenAI API key without saving profile changes."""
+    data = request.get_json(silent=True) or {}
+    user = request.current_user
+
+    if "openai_api_key" in data:
+        api_key = str(data.get("openai_api_key") or "").strip()
+        key_source = "provided"
+    else:
+        api_key = str(user.openai_api_key or "").strip()
+        key_source = "saved"
+
+    if not api_key:
+        return jsonify({
+            "ok": False,
+            "source": key_source,
+            "detail": "No API key provided. Paste a key or save one first.",
+        }), 400
+
+    if len(api_key) < 20:
+        return jsonify({
+            "ok": False,
+            "source": key_source,
+            "detail": "API key looks too short.",
+        }), 400
+
+    key_works, key_error = test_openai_api_key(api_key)
+    if not key_works:
+        return jsonify({
+            "ok": False,
+            "source": key_source,
+            "detail": key_error or "API key test failed.",
+        }), 400
+
+    return jsonify({
+        "ok": True,
+        "source": key_source,
+        "detail": "API key works.",
+    }), 200
+
+
 @auth_bp.patch('/me')
 @token_required
 def update_current_user():
@@ -234,7 +277,7 @@ def update_current_user():
 @token_required
 def delete_account():
     """Delete the current user account and all their data."""
-    from app.models import Task, TaskHistory, ActivityScore, RoutineProfile, AIUsage, Message
+    from app.models import Task, TaskHistory, ActivityScore, RoutineProfile, AIUsage, Conversation
     
     user = request.current_user
     User, db, _, _, _, _ = get_models()
@@ -245,7 +288,7 @@ def delete_account():
     db.session.query(ActivityScore).filter(ActivityScore.user_id == user.id).delete()
     db.session.query(RoutineProfile).filter(RoutineProfile.user_id == user.id).delete()
     db.session.query(AIUsage).filter(AIUsage.user_id == user.id).delete()
-    db.session.query(Message).filter(Message.user_id == user.id).delete()
+    db.session.query(Conversation).filter(Conversation.user_id == user.id).delete()
 
     # Delete the user account
     db.session.delete(user)
