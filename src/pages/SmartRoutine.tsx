@@ -1,15 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { CalendarDays } from "lucide-react";
 import { Header } from "@/components/Header";
 import { Button } from "@/components/ui/button";
+import { Calendar } from "@/components/ui/calendar";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { useTasks } from "@/lib/taskStore";
+import { formatLocalDate } from "@/lib/dateTime";
 import { findProtectedWorkConflicts, moveTasksOutsideProtectedWork } from "@/lib/scheduleGuards";
 import type { Task } from "@/types/task";
+import { cn } from "@/lib/utils";
 
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
 
@@ -32,10 +37,11 @@ const SmartRoutine = () => {
   const [workMode, setWorkMode] = useState<"office" | "hybrid" | "remote" | "shift">("hybrid");
   const [energyPeakTime, setEnergyPeakTime] = useState("10:00");
   const todayDate = new Date();
-  const todayIso = todayDate.toISOString().split("T")[0];
+  const todayIso = formatLocalDate(todayDate);
   const lastDayOfMonth = new Date(todayDate.getFullYear(), todayDate.getMonth() + 1, 0);
-  const lastDayOfMonthIso = lastDayOfMonth.toISOString().split("T")[0];
+  const lastDayOfMonthIso = formatLocalDate(lastDayOfMonth);
   const [endDate, setEndDate] = useState(lastDayOfMonthIso);
+  const [endDateCalendarOpen, setEndDateCalendarOpen] = useState(false);
   const [wakeTime, setWakeTime] = useState("07:00");
   const [sleepTime, setSleepTime] = useState("23:00");
   const [workStartTime, setWorkStartTime] = useState("09:00");
@@ -88,6 +94,10 @@ const SmartRoutine = () => {
   }, []);
 
   const canSubmit = useMemo(() => Boolean(endDate) && workingDays.length > 0, [endDate, workingDays.length]);
+  const selectedEndDate = useMemo(() => {
+    const parsed = new Date(`${endDate}T00:00:00`);
+    return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+  }, [endDate]);
 
   const toggleDay = (day: string) => {
     setWorkingDays((current) => current.includes(day) ? current.filter((d) => d !== day) : [...current, day]);
@@ -336,12 +346,46 @@ const SmartRoutine = () => {
 
             <div className="space-y-2">
               <Label>Plan routine until</Label>
+              <Popover open={endDateCalendarOpen} onOpenChange={setEndDateCalendarOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className={cn(
+                      "w-full justify-start text-left font-normal",
+                      !endDate && "text-muted-foreground",
+                    )}
+                  >
+                    <CalendarDays className="h-4 w-4" />
+                    {selectedEndDate ? selectedEndDate.toLocaleDateString(undefined, {
+                      weekday: "short",
+                      month: "short",
+                      day: "numeric",
+                      year: "numeric",
+                    }) : "Choose end date"}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-auto p-0">
+                  <Calendar
+                    mode="single"
+                    selected={selectedEndDate}
+                    defaultMonth={selectedEndDate}
+                    onSelect={(date) => {
+                      if (!date) return;
+                      setEndDate(formatLocalDate(date));
+                      setEndDateCalendarOpen(false);
+                    }}
+                    disabled={(date) => formatLocalDate(date) < todayIso}
+                    initialFocus
+                  />
+                </PopoverContent>
+              </Popover>
               <Input
                 type="date"
                 value={endDate}
                 min={todayIso}
-                max={lastDayOfMonthIso}
                 onChange={(e) => setEndDate(e.target.value)}
+                aria-label="Routine end date"
               />
             </div>
           </div>
