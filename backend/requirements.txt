@@ -1,6 +1,7 @@
 flask
 flask-cors
 flask-sqlalchemy
+psycopg2-binary
 python-dotenv
 pydantic
 pydantic[email]
@@ -8,4 +9,3 @@ openai
 python-jose[cryptography]
 passlib[bcrypt]
 python-multipart
-

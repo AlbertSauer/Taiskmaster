@@ -8,13 +8,14 @@ Run this from the project root:
 
 ```bash
 npm install
+docker compose up -d postgres
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cd ..
 printf 'VITE_API_URL=http://localhost:8000\n' > .env.local
-printf 'DATABASE_URL=sqlite:///./dev.db\nALLOWED_ORIGINS=http://localhost:8080,http://127.0.0.1:8080\nOPENAI_MODEL=gpt-4.1-mini\nOPENAI_INPUT_COST_PER_1M=0.40\nOPENAI_OUTPUT_COST_PER_1M=1.60\nSECRET_KEY=change-this-in-production\n' > backend/.env
+printf 'DATABASE_URL=postgresql+psycopg2://taiskmaster:taiskmaster@localhost:5433/taiskmaster\nALLOWED_ORIGINS=http://localhost:8080,http://127.0.0.1:8080\nOPENAI_MODEL=gpt-4.1-mini\nOPENAI_INPUT_COST_PER_1M=0.40\nOPENAI_OUTPUT_COST_PER_1M=1.60\nSECRET_KEY=change-this-in-production\n' > backend/.env
 (cd backend && source .venv/bin/activate && python run.py) & npm run dev
 ```
 
@@ -45,7 +46,7 @@ The backend does not use an API key from code or `.env`. Add the key inside the 
 3. Paste the key into `OpenAI API key`.
 4. Save. The app tests the key before storing it.
 
-Without a saved profile key, local and rule-based assistant features still work, but live AI interpretation needs the saved key.
+Without a saved profile key, Lite mode still handles supported app-manager commands, but live AI interpretation needs the saved key.
 
 ## Demo Prompts
 

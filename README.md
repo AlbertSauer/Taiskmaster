@@ -1,6 +1,6 @@
 # Taiskmaster
 
-Taiskmaster is a smart calendar and task manager built with React, Vite, TypeScript, Tailwind, and a Flask API. It combines daily task management, calendar imports, routine generation, statistics, and an AI assistant that turns natural language into app actions.
+Taiskmaster is a smart calendar and task manager built with React, Vite, TypeScript, Tailwind, PostgreSQL, and a Flask API. It combines daily task management, calendar imports, routine generation, statistics, and an AI assistant that turns natural language into app actions.
 
 ## Overview
 
@@ -17,7 +17,7 @@ The app is designed around a daily dashboard and an assistant-driven workflow. U
 - Assistant:
   - Sends user input to the backend API by default.
   - Converts natural language into structured commands such as `create_task`, `create_tasks`, `update_task`, `delete_task`, and `app_command`.
-  - Saves authenticated assistant chats in the backend `conversations` and `messages` tables so they can be inspected in a SQLite DB browser.
+  - Saves authenticated assistant chats in the backend `conversations` and `messages` tables so they can be inspected in a PostgreSQL client.
   - Saves the user message first, then saves the assistant answer with source, status, returned actions, and related metadata.
   - Supports complex phrases like "delete all tomorrow", "delete work tomorrow", "plan the usual routine for tomorrow", and "plan something some day next week".
   - Falls back to Lite mode when the live AI key is missing or fails, and still shows previewable task windows for supported planning and delete commands.
@@ -53,7 +53,7 @@ The app is designed around a daily dashboard and an assistant-driven workflow. U
   - JWT authentication.
   - Password changes require current password, new password, and confirmation.
   - Personal OpenAI API keys are entered in Profile options, can be tested on demand, are tested before saving, and are never returned to the frontend.
-  - Existing SQLite databases are migrated on startup for new task note and user API-key fields.
+  - PostgreSQL is the default backend database. SQLAlchemy creates required tables on backend startup.
 
 ## Run The App
 
@@ -65,13 +65,14 @@ Run this from the project root:
 
 ```bash
 npm install
+docker compose up -d postgres
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cd ..
 printf 'VITE_API_URL=http://localhost:8000\n' > .env.local
-printf 'DATABASE_URL=sqlite:///./dev.db\nALLOWED_ORIGINS=http://localhost:8080,http://127.0.0.1:8080\nOPENAI_MODEL=gpt-4.1-mini\nOPENAI_INPUT_COST_PER_1M=0.40\nOPENAI_OUTPUT_COST_PER_1M=1.60\nSECRET_KEY=change-this-in-production\n' > backend/.env
+printf 'DATABASE_URL=postgresql+psycopg2://taiskmaster:taiskmaster@localhost:5433/taiskmaster\nALLOWED_ORIGINS=http://localhost:8080,http://127.0.0.1:8080\nOPENAI_MODEL=gpt-4.1-mini\nOPENAI_INPUT_COST_PER_1M=0.40\nOPENAI_OUTPUT_COST_PER_1M=1.60\nSECRET_KEY=change-this-in-production\n' > backend/.env
 (cd backend && source .venv/bin/activate && python run.py) & npm run dev
 ```
 
@@ -107,13 +108,21 @@ If a key is already saved, `Test API key` checks the saved key without revealing
 
 ## Local Database
 
-The default SQLite database is created at:
+The default database is PostgreSQL. Local development uses the service in [docker-compose.yml](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/docker-compose.yml):
 
-```text
-backend/instance/dev.db
+```bash
+docker compose up -d postgres
 ```
 
-Assistant chats are saved for authenticated users in:
+Default local connection:
+
+```text
+postgresql+psycopg2://taiskmaster:taiskmaster@localhost:5433/taiskmaster
+```
+
+The backend reads `DATABASE_URL` from `backend/.env`. It also accepts `postgres://` and `postgresql://` URLs and normalizes them for SQLAlchemy.
+
+Assistant chats are saved for authenticated users in these PostgreSQL tables:
 
 - `conversations`
 - `messages`
@@ -141,13 +150,16 @@ npm run dev
 Backend:
 
 ```bash
+docker compose up -d postgres
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-printf 'DATABASE_URL=sqlite:///./dev.db\nALLOWED_ORIGINS=http://localhost:8080,http://127.0.0.1:8080\nOPENAI_MODEL=gpt-4.1-mini\nOPENAI_INPUT_COST_PER_1M=0.40\nOPENAI_OUTPUT_COST_PER_1M=1.60\nSECRET_KEY=change-this-in-production\n' > .env
+printf 'DATABASE_URL=postgresql+psycopg2://taiskmaster:taiskmaster@localhost:5433/taiskmaster\nALLOWED_ORIGINS=http://localhost:8080,http://127.0.0.1:8080\nOPENAI_MODEL=gpt-4.1-mini\nOPENAI_INPUT_COST_PER_1M=0.40\nOPENAI_OUTPUT_COST_PER_1M=1.60\nSECRET_KEY=change-this-in-production\n' > .env
 python run.py
 ```
+
+Existing SQLite data is not migrated automatically. If you need to keep old development data, export it from the SQLite database first and import it into PostgreSQL.
 
 ## Checks
 
@@ -174,5 +186,6 @@ Current known lint note: `src/hooks/useAuth.tsx` has the existing React Fast Ref
 - `backend/app/auth.py`: auth, profile updates, password handling, and API-key save/test routes.
 - `backend/app/chat_api.py`: assistant, non-overlapping recommendations, optimization, activity insights, routines, usage routes.
 - `backend/app/tasks_api.py`: backend task CRUD and task history.
-- `backend/app/models.py`: SQLite models.
+- `backend/app/models.py`: SQLAlchemy models.
+- `docker-compose.yml`: local PostgreSQL service.
 - `backend/app/ai_usage.py`: AI token and cost tracking.

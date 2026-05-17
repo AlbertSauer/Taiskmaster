@@ -18,6 +18,7 @@ class User(db.Model):
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
+    tasks = db.relationship('Task', back_populates='user', cascade='all, delete-orphan')
     conversations = db.relationship('Conversation', back_populates='user', cascade='all, delete-orphan')
     activity_scores = db.relationship('ActivityScore', back_populates='user', cascade='all, delete-orphan')
     task_history = db.relationship('TaskHistory', back_populates='user', cascade='all, delete-orphan')
@@ -41,6 +42,8 @@ class Task(db.Model):
     tags = db.Column(db.JSON, nullable=False, default=list)
     completed = db.Column(db.Boolean, default=False, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    user = db.relationship('User', back_populates='tasks')
 
 
 class Conversation(db.Model):

@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: taiskmaster-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: taiskmaster
+      POSTGRES_USER: taiskmaster
+      POSTGRES_PASSWORD: taiskmaster
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taiskmaster -d taiskmaster"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:

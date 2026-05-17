@@ -7,9 +7,19 @@ from app.env import load_app_env
 
 load_app_env()
 
+
+def get_database_url():
+    url = os.getenv("DATABASE_URL", "postgresql+psycopg2://taiskmaster:taiskmaster@localhost:5433/taiskmaster")
+    if url.startswith("postgres://"):
+        return "postgresql+psycopg2://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        return "postgresql+psycopg2://" + url[len("postgresql://"):]
+    return url
+
+
 # Initialize Flask app
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv("DATABASE_URL", "sqlite:///./dev.db")
+app.config['SQLALCHEMY_DATABASE_URI'] = get_database_url()
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Initialize database
