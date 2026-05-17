@@ -40,11 +40,13 @@ interface AssistantTaskPayload {
 }
 
 export interface AssistantAction {
-  type: "create_task" | "create_tasks" | "update_task" | "delete_task" | "optimize_schedule";
+  type: "create_task" | "create_tasks" | "update_task" | "delete_task" | "optimize_schedule" | "app_command";
   task?: AssistantTaskPayload;
   tasks?: AssistantTaskPayload[];
   task_id?: string;
   updates?: Partial<Task>;
+  command?: string;
+  payload?: Record<string, string | number | boolean | null | undefined>;
 }
 
 interface AssistantResult {
@@ -113,23 +115,15 @@ const chatStorageKey = (userId?: string) =>
 const pendingProposalStorageKey = (userId?: string) =>
   userId ? `taiskmaster.assistant.pending.${userId}` : "taiskmaster.assistant.pending";
 
-const defaultVoiceLanguages = [
+const defaultEnglishVoiceLanguages = [
   "en-US",
-  "de-DE",
-  "fr-FR",
-  "es-ES",
-  "it-IT",
-  "pt-BR",
-  "nl-NL",
-  "pl-PL",
-  "tr-TR",
-  "ru-RU",
-  "uk-UA",
-  "ar-SA",
-  "hi-IN",
-  "ja-JP",
-  "ko-KR",
-  "zh-CN",
+  "en-GB",
+  "en-AU",
+  "en-CA",
+  "en-IE",
+  "en-IN",
+  "en-NZ",
+  "en-ZA",
 ];
 
 const languageLabel = (code: string) => {
@@ -148,6 +142,33 @@ const uniqueVoiceLanguages = (codes: string[]) => {
     seen.add(normalized);
     return true;
   });
+};
+
+const isEnglishVoiceCode = (code: string) => code.trim().toLowerCase().startsWith("en");
+
+const voiceQualityScore = (voice: SpeechSynthesisVoice, preferredLanguage: string) => {
+  const name = voice.name.toLowerCase();
+  const lang = voice.lang.toLowerCase();
+  const preferred = preferredLanguage.toLowerCase();
+  let score = 0;
+
+  if (lang === preferred) score += 80;
+  else if (lang.startsWith(preferred.split("-")[0])) score += 40;
+  if (voice.localService) score += 8;
+  if (voice.default) score += 4;
+  if (/\b(samantha|alex|daniel|karen|moira|tessa|victoria|allison|ava|susan|zira|aria|jenny|guy|google us english|google uk english)\b/.test(name)) {
+    score += 24;
+  }
+  if (/\b(natural|premium|enhanced|neural|online)\b/.test(name)) score += 16;
+  if (/\b(compact|novelty|whisper|trinoids|zarvox|bells|bubbles|bad news|good news|organ|cellos)\b/.test(name)) score -= 35;
+
+  return score;
+};
+
+const selectBestEnglishVoice = (voices: SpeechSynthesisVoice[], preferredLanguage: string) => {
+  return voices
+    .filter((voice) => isEnglishVoiceCode(voice.lang))
+    .sort((a, b) => voiceQualityScore(b, preferredLanguage) - voiceQualityScore(a, preferredLanguage))[0] ?? null;
 };
 
 const parseRelativeDate = (text: string) => {
@@ -196,6 +217,48 @@ const parseDateReference = (text: string) => {
   return formatLocalDate(date);
 };
 
+const addDays = (date: Date, days: number) => {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+};
+
+const parseFlexibleDateRange = (text: string) => {
+  const lowered = text.toLowerCase();
+  const today = new Date();
+
+  if (/\bnext\s+week\b/.test(lowered)) {
+    const start = addDays(today, ((1 - today.getDay() + 7) % 7) || 7);
+    return { start, end: addDays(start, 6) };
+  }
+
+  if (/\bthis\s+week\b/.test(lowered)) {
+    return { start: today, end: addDays(today, 6 - today.getDay()) };
+  }
+
+  if (/\bthis\s+month\b/.test(lowered)) {
+    return { start: today, end: new Date(today.getFullYear(), today.getMonth() + 1, 0) };
+  }
+
+  const recurringPeriod = parseRecurringPeriod(text);
+  if (recurringPeriod.end) return recurringPeriod;
+
+  const date = new Date(`${parseDateReference(text)}T00:00:00`);
+  return { start: date, end: date };
+};
+
+const eachDateInRange = (start: Date, end: Date) => {
+  const dates: Date[] = [];
+  const current = new Date(start);
+  while (current <= end && dates.length < 370) {
+    dates.push(new Date(current));
+    current.setDate(current.getDate() + 1);
+  }
+  return dates;
+};
+
+const dateReferencePattern = /\b(today|tomorrow|next\s+week|this\s+week|this\s+month|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|in\s+\d+\s+days?)\b/i;
+
 const formatCalendarTask = (task: Task) =>
   `• ${task.time ? `${task.time} — ` : ""}${task.title}${task.location ? ` (${task.location})` : ""}`;
 
@@ -220,6 +283,21 @@ const minutesToAssistantTime = (minutes: number) => {
 
 const normalizedTaskTitle = (title?: string) =>
   (title || "").trim().toLowerCase().replace(/\s+/g, " ");
+
+const taskMatchesQuery = (task: Task, query: string) => {
+  const words = normalizedTaskTitle(query)
+    .split(/\s+/)
+    .filter((word) => word.length > 1 && !["task", "tasks", "calendar", "all", "every"].includes(word));
+  if (!words.length) return true;
+  const haystack = normalizedTaskTitle([
+    task.title,
+    task.description,
+    task.note,
+    task.location,
+    ...(task.tags ?? []),
+  ].filter(Boolean).join(" "));
+  return words.every((word) => haystack.includes(word));
+};
 
 const extractTaskNoteRequest = (input: string) => {
   const trimmed = input.trim();
@@ -509,7 +587,16 @@ const parseRecurringPeriod = (text: string) => {
     };
   }
 
+  const wordAmountMatch = text.match(/\bfor\s+(a|an|one)\s+(day|week|month)\b/i);
   const match = text.match(/\bfor\s+(\d+)\s+(day|days|week|weeks|month|months)\b/i);
+  if (!match && wordAmountMatch) {
+    const end = new Date(today);
+    const unit = wordAmountMatch[2].toLowerCase();
+    if (unit === "day") end.setDate(today.getDate());
+    else if (unit === "week") end.setDate(today.getDate() + 6);
+    else end.setDate(today.getDate() + 30 - 1);
+    return { start: today, end };
+  }
   if (!match) return { start: today, end: undefined };
 
   const amount = Number(match[1]);
@@ -623,6 +710,115 @@ const parseRecurringTasks = (input: string): AssistantResult | null => {
   return {
     reply: `Scheduled "${title}" ${recurrence} from ${tasks[0].date} to ${tasks[tasks.length - 1].date}.`,
     actions: [{ type: "create_tasks", tasks }],
+  };
+};
+
+const preferredActivityTitles = [
+  "Workout session",
+  "Reading time",
+  "Mindfulness break",
+  "Hobby time",
+  "Planning review",
+  "Walk outside",
+];
+
+const pickOpenActivitySlot = (
+  tasks: Task[],
+  start: Date,
+  end: Date,
+  accepted: AssistantTaskPayload[] = [],
+) => {
+  const dates = eachDateInRange(start, end);
+  const preferredStarts = [18 * 60, 17 * 60 + 30, 19 * 60, 12 * 60 + 30, 8 * 60 + 30, 20 * 60];
+  const duration = 60;
+
+  for (const date of dates) {
+    const dateValue = formatLocalDate(date);
+    for (const startMinute of preferredStarts) {
+      const candidate: AssistantTaskPayload = {
+        title: "Personal activity",
+        description: "Flexible activity planned by the assistant.",
+        date: dateValue,
+        time: minutesToAssistantTime(startMinute),
+        duration,
+        priority: "medium",
+        tags: ["personal"],
+        completed: false,
+      };
+      const blockers = [
+        ...tasks.filter((task) => task.date === dateValue && !task.completed),
+        ...accepted.filter((task) => task.date === dateValue),
+      ];
+      if (!blockers.some((task) => taskOverlaps(candidate, task))) {
+        return candidate;
+      }
+    }
+  }
+
+  return null;
+};
+
+const buildFlexibleActivityPlan = (input: string, tasks: Task[]): AssistantResult | null => {
+  const lowered = input.toLowerCase();
+  if (!/\b(plan|schedule|create|add|make)\b/.test(lowered)) return null;
+  if (!/\b(something|activity|workout|exercise|reading|mindfulness|hobby|walk|personal)\b/.test(lowered)) return null;
+
+  const onceWeekly = /\b(once\s+a\s+week|once\s+per\s+week|weekly)\b/.test(lowered);
+  const { start, end } = parseFlexibleDateRange(input);
+  const requestedTitle = preferredActivityTitles.find((title) => lowered.includes(title.toLowerCase().split(" ")[0]));
+  const title = requestedTitle ?? "Personal activity";
+  const description = compactDescription(title, input);
+
+  if (onceWeekly) {
+    const planned: AssistantTaskPayload[] = [];
+    const cursor = new Date(start);
+    while (cursor <= end && planned.length < 12) {
+      const weekEnd = addDays(cursor, 6);
+      const slot = pickOpenActivitySlot(tasks, cursor, weekEnd < end ? weekEnd : end, planned);
+      if (slot) {
+        planned.push({
+          ...slot,
+          title,
+          description,
+          tags: Array.from(new Set([...(slot.tags ?? []), "weekly", "routine"])),
+        });
+      }
+      cursor.setDate(cursor.getDate() + 7);
+    }
+
+    if (!planned.length) {
+      return {
+        reply: "I could not find a clean weekly slot in that period without overlapping your calendar.",
+        actions: [],
+      };
+    }
+
+    return {
+      reply: `I planned "${title}" once a week from ${dateLabel(planned[0].date)} to ${dateLabel(planned[planned.length - 1].date)}. Review it before saving.`,
+      actions: [{ type: "create_tasks", tasks: planned }],
+    };
+  }
+
+  if (!/\b(next\s+week|this\s+week|this\s+month|some\s+day|someday|one\s+day|free\s+day|open\s+slot)\b/.test(lowered)) return null;
+
+  const slot = pickOpenActivitySlot(tasks, start, end);
+  if (!slot) {
+    return {
+      reply: "I could not find a clean open slot in that period without overlapping your calendar.",
+      actions: [],
+    };
+  }
+
+  return {
+    reply: `I found an open slot for "${title}" on ${dateLabel(slot.date)} at ${slot.time}. Review it before saving.`,
+    actions: [{
+      type: "create_task",
+      task: {
+        ...slot,
+        title,
+        description,
+      },
+    }],
   };
 };
 
@@ -928,25 +1124,66 @@ const buildCalendarManagerReply = (input: string, tasks: Task[]) => {
 const buildBulkDeleteByDate = (input: string, tasks: Task[]): AssistantResult | null => {
   const lowered = input.toLowerCase();
   if (!/\b(delete|remove|cancel|clear)\b/.test(lowered)) return null;
-  if (!/\b(all|everything|every|tasks?|calendar)\b/.test(lowered)) return null;
-  if (!/\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|in\s+\d+\s+days?)\b/.test(lowered)) return null;
+  if (!dateReferencePattern.test(lowered)) return null;
 
   const targetDate = parseDateReference(input);
-  const matchingTasks = tasks.filter((task) => task.date === targetDate);
+  const wantsWholeDay = /\b(all|everything|every|tasks?|calendar)\b/.test(lowered);
+  const query = input
+    .replace(/\b(delete|remove|cancel|clear)\b/gi, "")
+    .replace(dateReferencePattern, "")
+    .replace(/\b(all|everything|every|tasks?|calendar|on|for|from|the|my)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const matchingTasks = tasks.filter((task) => (
+    task.date === targetDate
+    && !task.completed
+    && (wantsWholeDay || taskMatchesQuery(task, query))
+  ));
   if (!matchingTasks.length) {
-    return { reply: `There are no tasks planned for ${dateLabel(targetDate)} to delete.`, actions: [] };
+    const scope = query && !wantsWholeDay ? ` matching "${query}"` : "";
+    return { reply: `There are no open tasks${scope} planned for ${dateLabel(targetDate)} to delete.`, actions: [] };
   }
 
   return {
-    reply: `I can delete all ${matchingTasks.length} task${matchingTasks.length === 1 ? "" : "s"} on ${dateLabel(targetDate)}.`,
+    reply: `I can delete ${matchingTasks.length === 1 ? `"${matchingTasks[0].title}"` : `${matchingTasks.length} tasks`} on ${dateLabel(targetDate)}.`,
     actions: matchingTasks.map((task) => ({ type: "delete_task", task_id: task.id })),
   };
+};
+
+const fetchActivityScoreSummary = async (authToken: string | null) => {
+  if (!API_BASE || !authToken) {
+    return "Open Activity scores from Profile tools to see your latest score and history.";
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}/api/chat/activity-scores`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    });
+    if (!response.ok) throw new Error("Could not load activity scores");
+    const data = await response.json() as {
+      scores?: Array<{
+        health_score: number;
+        status: string;
+        summary: string;
+        guidance?: string[];
+        created_at: string;
+      }>;
+    };
+    const latest = data.scores?.[0];
+    if (!latest) return "No activity score has been saved yet. Generate Activity insights first, then I can summarize the result here.";
+
+    const guidance = latest.guidance?.length ? `\nGuidance:\n${latest.guidance.slice(0, 3).map((item) => `• ${item}`).join("\n")}` : "";
+    return `Your latest activity score is ${latest.health_score}/100 (${latest.status}). ${latest.summary}${guidance}`;
+  } catch {
+    return "I could not load the activity score right now. You can still open Activity scores from Profile tools.";
+  }
 };
 
 const runManagerIntent = async (
   input: string,
   ctx: ReturnType<typeof useTasks>,
   controls: AssistantManagerControls,
+  authToken: string | null,
 ): Promise<AssistantResult | null> => {
   const text = input.trim().toLowerCase();
 
@@ -970,8 +1207,19 @@ const runManagerIntent = async (
   const normalDayPlan = buildNormalDayPlan(input, ctx.tasks);
   if (normalDayPlan) return normalDayPlan;
 
+  const flexibleActivityPlan = buildFlexibleActivityPlan(input, ctx.tasks);
+  if (flexibleActivityPlan) return flexibleActivityPlan;
+
   const bulkDelete = buildBulkDeleteByDate(input, ctx.tasks);
   if (bulkDelete) return bulkDelete;
+
+  if (/\b(activity score|activity scores|act score|act scores|health score)\b/.test(text)) {
+    if (/\b(open|show|history|list)\b/.test(text)) {
+      controls.onOpenActivityScores?.();
+      return { reply: "Opened your activity score history." };
+    }
+    return { reply: await fetchActivityScoreSummary(authToken) };
+  }
 
   if (/\b(open|show|go to|take me to)\b/.test(text)) {
     if (/\b(options|settings|profile)\b/.test(text)) {
@@ -1029,9 +1277,6 @@ const runAssistant = async (
 
   if (!input.trim()) return { reply: "Tell me what you'd like to do." };
 
-  const managerResult = await runManagerIntent(input, ctx, controls);
-  if (managerResult) return managerResult;
-
   if (useLiveAssistant) {
     try {
       const headers: Record<string, string> = {
@@ -1071,9 +1316,14 @@ const runAssistant = async (
 
       return { reply: data.reply || "I couldn't get an answer right now.", actions: data.actions };
     } catch {
+      const managerResult = await runManagerIntent(input, ctx, controls, authToken);
+      if (managerResult) return managerResult;
       return runLocalFallbackAssistant(input, ctx);
     }
   }
+
+  const managerResult = await runManagerIntent(input, ctx, controls, authToken);
+  if (managerResult) return managerResult;
 
   return runLocalFallbackAssistant(input, ctx);
 };
@@ -1124,6 +1374,86 @@ const applyAssistantActions = async (
   }
 };
 
+const executeAppCommand = async (
+  action: AssistantAction,
+  ctx: ReturnType<typeof useTasks>,
+  controls: AssistantManagerControls,
+  authToken: string | null,
+  sourceInput: string,
+) => {
+  const command = action.command;
+  const payload = action.payload ?? {};
+
+  switch (command) {
+    case "open_profile":
+    case "open_options":
+      window.dispatchEvent(new Event("taiskmaster:open-profile"));
+      return "Opened your profile and options.";
+    case "open_activity_scores":
+      controls.onOpenActivityScores?.();
+      return "Opened your activity score history.";
+    case "open_task_history":
+      controls.onOpenTaskHistory?.();
+      return "Opened your task history.";
+    case "open_routines":
+      controls.onOpenRoutineProfiles?.();
+      return "Opened your saved routines.";
+    case "open_import_calendar":
+      controls.onOpenImportCalendar?.();
+      return "Opened calendar import.";
+    case "open_statistics":
+      controls.onOpenStatistics?.();
+      return "Opening Smart Statistics.";
+    case "open_smart_routine":
+      controls.onOpenSmartRoutine?.();
+      return "Opening Smart Routine.";
+    case "open_smart_vacation":
+      controls.onOpenSmartVacation?.();
+      return "Opening Smart Vacation.";
+    case "open_optimize_scope":
+      controls.onOpenOptimizeScope?.();
+      return "Opened the optimizer options.";
+    case "optimize_date": {
+      const date = typeof payload.date === "string" ? payload.date : parseDateReference(sourceInput);
+      controls.onOptimizeDate?.(date);
+      return `Opened an optimize preview for ${dateLabel(date)}.`;
+    }
+    case "fetch_weather":
+      return fetchWeatherSummary(typeof payload.query === "string" ? payload.query : sourceInput);
+    case "summarize_activity_score":
+      return fetchActivityScoreSummary(authToken);
+    case "summarize_calendar_date": {
+      const date = typeof payload.date === "string" ? payload.date : parseDateReference(sourceInput);
+      const scopedInput = `what is planned on ${date}`;
+      return buildCalendarManagerReply(scopedInput, ctx.tasks) ?? `Nothing is scheduled for ${dateLabel(date)}.`;
+    }
+    default:
+      return null;
+  }
+};
+
+const executeImmediateActions = async (
+  actions: AssistantAction[],
+  ctx: ReturnType<typeof useTasks>,
+  controls: AssistantManagerControls,
+  authToken: string | null,
+  sourceInput: string,
+) => {
+  const replies: string[] = [];
+
+  for (const action of actions) {
+    if (action.type === "app_command") {
+      const reply = await executeAppCommand(action, ctx, controls, authToken, sourceInput);
+      if (reply) replies.push(reply);
+    } else if (action.type === "optimize_schedule") {
+      controls.onOpenOptimizeScope?.();
+      replies.push("Opened the optimizer options.");
+    }
+  }
+
+  return replies;
+};
+
 export const AssistantPanel = ({
   onProposedAction,
   ...managerControls
@@ -1142,7 +1472,7 @@ export const AssistantPanel = ({
   const [voiceRepliesEnabled, setVoiceRepliesEnabled] = useState(false);
   const [liveTranscript, setLiveTranscript] = useState("");
   const [pendingProposal, setPendingProposal] = useState<PendingProposal | null>(null);
-  const [voiceLanguage, setVoiceLanguage] = useState(() => navigator.language || "en-US");
+  const [voiceLanguage, setVoiceLanguage] = useState("en-US");
   const [voiceLanguages, setVoiceLanguages] = useState<VoiceLanguageOption[]>([]);
   const taskCtx = useTasks();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1231,12 +1561,12 @@ export const AssistantPanel = ({
     if (!voiceRepliesEnabled || !("speechSynthesis" in window)) return;
 
     const utterance = new SpeechSynthesisUtterance(content);
-    utterance.lang = voiceLanguage;
-
-    const voices = voicesRef.current;
-    const exactMatch = voices.find((voice) => voice.lang === voiceLanguage);
-    const partialMatch = voices.find((voice) => voice.lang.toLowerCase().startsWith(voiceLanguage.split("-")[0].toLowerCase()));
-    if (exactMatch || partialMatch) utterance.voice = exactMatch ?? partialMatch ?? null;
+    const selectedVoice = selectBestEnglishVoice(voicesRef.current, voiceLanguage);
+    utterance.lang = selectedVoice?.lang ?? voiceLanguage;
+    utterance.voice = selectedVoice;
+    utterance.rate = 0.94;
+    utterance.pitch = 1;
+    utterance.volume = 1;
 
     window.speechSynthesis.cancel();
     window.speechSynthesis.speak(utterance);
@@ -1289,7 +1619,38 @@ export const AssistantPanel = ({
       const normalizedActions = normalizeAssistantActions(actions);
 
       if (normalizedActions.length) {
-        const act = normalizedActions.length === 1 ? normalizedActions[0] : null;
+        const immediateActions = normalizedActions.filter((action) => action.type === "app_command" || action.type === "optimize_schedule");
+        const deferredActions = normalizedActions.filter((action) => action.type !== "app_command" && action.type !== "optimize_schedule");
+        if (immediateActions.length) {
+          const commandReplies = await executeImmediateActions(immediateActions, taskCtx, managerControls, token, trimmed);
+          if (!deferredActions.length) {
+            const replyText = commandReplies.join("\n") || assistantText || "Done.";
+            const reply: Message = {
+              id: crypto.randomUUID(),
+              role: "assistant",
+              content: replyText,
+            };
+            setPendingProposal(null);
+            setMessages((m) => [...m, reply]);
+            speakAssistantReply(replyText);
+            return;
+          }
+        }
+
+        const actionableActions = deferredActions;
+        if (!actionableActions.length) {
+          const reply: Message = {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: assistantText,
+          };
+          setPendingProposal(null);
+          setMessages((m) => [...m, reply]);
+          speakAssistantReply(assistantText);
+          return;
+        }
+
+        const act = actionableActions.length === 1 ? actionableActions[0] : null;
         const isValidCreate = act?.type === "create_task" && act.task;
         const isValidUpdate = act?.type === "update_task" && act.task_id && act.updates;
         const isValidCreateTasks = act?.type === "create_tasks" && act.tasks?.length;
@@ -1310,13 +1671,13 @@ export const AssistantPanel = ({
           return;
         }
 
-        const summary = summarizeActions(normalizedActions, taskCtx.tasks);
+        const summary = summarizeActions(actionableActions, taskCtx.tasks);
         const reply: Message = {
           id: crypto.randomUUID(),
           role: "assistant",
           content: summary,
         };
-        setPendingProposal({ actions: normalizedActions, summary });
+        setPendingProposal({ actions: actionableActions, summary });
         setMessages((m) => [...m, reply]);
         speakAssistantReply("I have a plan ready. Please confirm if you want me to apply it.");
         return;
@@ -1363,19 +1724,20 @@ export const AssistantPanel = ({
       voicesRef.current = speechVoices;
       setVoiceOutputSupported(true);
 
-      const browserLanguages = navigator.languages?.length ? navigator.languages : [navigator.language];
       const allCodes = uniqueVoiceLanguages([
-        ...browserLanguages,
-        ...speechVoices.map((voice) => voice.lang),
-        ...defaultVoiceLanguages,
+        ...defaultEnglishVoiceLanguages,
+        ...speechVoices.map((voice) => voice.lang).filter(isEnglishVoiceCode),
       ]);
 
       setVoiceLanguages(
         allCodes.map((code) => ({
           code,
-          label: `${languageLabel(code)} (${code})`,
+          label: `English - ${languageLabel(code)} (${code})`,
         })),
       );
+      if (!allCodes.includes(voiceLanguage)) {
+        setVoiceLanguage(allCodes[0] ?? "en-US");
+      }
     };
 
     syncVoices();
@@ -1384,7 +1746,7 @@ export const AssistantPanel = ({
     return () => {
       window.speechSynthesis.onvoiceschanged = null;
     };
-  }, []);
+  }, [voiceLanguage]);
 
   useEffect(() => {
     const SpeechRecognitionCtor = (
@@ -1553,7 +1915,7 @@ export const AssistantPanel = ({
               <div className="flex items-center gap-2">
                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
                   <Languages className="h-3.5 w-3.5" />
-                  <span>Voice language</span>
+                  <span>English voice</span>
                 </div>
                 <Select value={voiceLanguage} onValueChange={setVoiceLanguage}>
                   <SelectTrigger className="h-8 flex-1 text-xs">

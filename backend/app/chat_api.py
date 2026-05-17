@@ -285,7 +285,7 @@ def _parse_date_reference(text):
 def _has_explicit_date(text):
     lowered = text.lower()
     return bool(
-        re.search(r"\b(today|tomorrow)\b", lowered)
+        re.search(r"\b(today|tomorrow|next\s+week|this\s+week|this\s+month)\b", lowered)
         or re.search(r"\bin\s+\d+\s+days?\b", lowered)
         or re.search(r"\b\d+\s+days?\s+from\s+(?:now|today)\b", lowered)
         or re.search(r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", lowered)
@@ -394,7 +394,20 @@ def _parse_period_limit(text):
         if start_date and end_date:
             return start_date, end_date
 
+    word_amount_match = re.search(r"\bfor\s+(a|an|one)\s+(day|week|month)\b", lowered)
     period_match = re.search(r"\bfor\s+(\d+)\s+(day|days|week|weeks|month|months)\b", lowered)
+    if not period_match and word_amount_match:
+        amount = 1
+        unit = word_amount_match.group(2)
+        start = datetime.now().date()
+        if "day" in unit:
+            end = start
+        elif "week" in unit:
+            end = start + timedelta(days=6)
+        else:
+            end = start + timedelta(days=29)
+        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
     if period_match:
         amount = int(period_match.group(1))
         unit = period_match.group(2)
@@ -417,6 +430,152 @@ def _parse_period_limit(text):
         return today.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
 
     return None, None
+
+
+def _task_matches_query(task, query):
+    words = [
+        word for word in re.sub(r"\s+", " ", query.lower()).split(" ")
+        if len(word) > 1 and word not in {"task", "tasks", "calendar", "all", "every"}
+    ]
+    if not words:
+        return True
+    tags = task.get("tags") if isinstance(task.get("tags"), list) else []
+    haystack = " ".join(
+        str(value or "") for value in [
+            task.get("title"),
+            task.get("description"),
+            task.get("note"),
+            task.get("location"),
+            " ".join(str(tag) for tag in tags),
+        ]
+    ).lower()
+    return all(word in haystack for word in words)
+
+
+def _date_range_for_flexible_plan(text):
+    lowered = text.lower()
+    today = datetime.now().date()
+
+    if "next week" in lowered:
+        days_until_monday = (0 - today.weekday()) % 7 or 7
+        start = today + timedelta(days=days_until_monday)
+        return start, start + timedelta(days=6)
+
+    if "this week" in lowered:
+        return today, today + timedelta(days=6 - today.weekday())
+
+    start_date, end_date = _parse_period_limit(text)
+    if start_date and end_date:
+        return datetime.strptime(start_date, "%Y-%m-%d").date(), datetime.strptime(end_date, "%Y-%m-%d").date()
+
+    target_date = _parse_date_reference(text)
+    if target_date:
+        parsed = datetime.strptime(target_date, "%Y-%m-%d").date()
+        return parsed, parsed
+
+    return today, today + timedelta(days=7)
+
+
+def _activity_title_from_text(text):
+    lowered = text.lower()
+    if re.search(r"\b(workout|exercise|gym|training)\b", lowered):
+        return "Workout session", ["personal", "health", "sports"]
+    if re.search(r"\b(read|reading|book)\b", lowered):
+        return "Reading time", ["personal", "reading"]
+    if re.search(r"\b(meditation|mindful|mindfulness|recovery)\b", lowered):
+        return "Mindfulness break", ["personal", "health", "recovery"]
+    if re.search(r"\b(walk|outside)\b", lowered):
+        return "Walk outside", ["personal", "health"]
+    if re.search(r"\b(hobby|fun)\b", lowered):
+        return "Hobby time", ["personal", "hobbies"]
+    return "Personal activity", ["personal"]
+
+
+def _open_activity_slot(tasks, start_date, end_date, accepted=None):
+    accepted = accepted or []
+    duration = 60
+    preferred_starts = ["18:00", "17:30", "19:00", "12:30", "08:30", "20:00"]
+    current = start_date
+    while current <= end_date:
+        date_value = current.strftime("%Y-%m-%d")
+        blockers = [
+            task for task in tasks
+            if task.get("date") == date_value and not task.get("completed")
+        ] + [
+            task for task in accepted
+            if task.get("date") == date_value
+        ]
+        for preferred_time in preferred_starts:
+            slot = _suggest_time_for_date(blockers, date_value, duration, preferred_time=preferred_time, strict=True)
+            if slot:
+                return date_value, slot
+        current += timedelta(days=1)
+    return None, None
+
+
+def _parse_flexible_activity_plan(text, tasks):
+    lowered = text.lower()
+    if not re.search(r"\b(plan|schedule|create|add|make)\b", lowered):
+        return None
+    if not re.search(r"\b(something|activity|workout|exercise|reading|mindfulness|hobby|walk|personal)\b", lowered):
+        return None
+
+    start_date, end_date = _date_range_for_flexible_plan(text)
+    title, tags = _activity_title_from_text(text)
+    description = _compact_description(title, text)
+    priority = _infer_priority(text)
+    once_weekly = bool(re.search(r"\b(once\s+a\s+week|once\s+per\s+week|weekly)\b", lowered))
+
+    if once_weekly:
+        generated = []
+        cursor = start_date
+        while cursor <= end_date and len(generated) < 12:
+            week_end = min(cursor + timedelta(days=6), end_date)
+            date_value, time_value = _open_activity_slot(tasks, cursor, week_end, generated)
+            if date_value and time_value:
+                generated.append({
+                    "title": title,
+                    "description": description,
+                    "date": date_value,
+                    "time": time_value,
+                    "duration": 60,
+                    "location": None,
+                    "priority": priority,
+                    "tags": list(dict.fromkeys(tags + ["weekly", "routine"])),
+                    "completed": False,
+                })
+            cursor += timedelta(days=7)
+
+        if not generated:
+            return {"reply": "I could not find a clean weekly slot in that period without overlapping your calendar.", "actions": []}
+        return {
+            "reply": f'Planned "{title}" once a week from {generated[0]["date"]} to {generated[-1]["date"]}.',
+            "actions": [{"type": "create_tasks", "tasks": generated}],
+        }
+
+    if not re.search(r"\b(next\s+week|this\s+week|this\s+month|some\s+day|someday|one\s+day|free\s+day|open\s+slot)\b", lowered):
+        return None
+
+    date_value, time_value = _open_activity_slot(tasks, start_date, end_date)
+    if not date_value or not time_value:
+        return {"reply": "I could not find a clean open slot in that period without overlapping your calendar.", "actions": []}
+    return {
+        "reply": f'Found an open slot for "{title}" on {date_value} at {time_value}.',
+        "actions": [{
+            "type": "create_task",
+            "task": {
+                "title": title,
+                "description": description,
+                "date": date_value,
+                "time": time_value,
+                "duration": 60,
+                "location": None,
+                "priority": priority,
+                "tags": tags,
+                "completed": False,
+            },
+        }],
+    }
 
 
 def _extract_task_subject(text):
@@ -697,21 +856,36 @@ def _parse_completion(text, tasks):
 
 def _parse_deletion(text, tasks):
     lowered = text.lower()
-    bulk_match = (
-        re.search(r"\b(delete|remove|cancel|clear)\b", lowered)
-        and re.search(r"\b(all|everything|every|tasks?|calendar)\b", lowered)
-        and re.search(r"\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|in\s+\d+\s+days?)\b", lowered)
+    has_date_scope = re.search(
+        r"\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|in\s+\d+\s+days?)\b",
+        lowered,
     )
-    if bulk_match:
+    if re.search(r"\b(delete|remove|cancel|clear)\b", lowered) and has_date_scope:
         target_date = _parse_date_reference(text) or _parse_relative_date(text)
-        matching_tasks = [task for task in tasks if task.get("date") == target_date]
+        wants_whole_day = bool(re.search(r"\b(all|everything|every|tasks?|calendar)\b", lowered))
+        query = re.sub(r"\b(delete|remove|cancel|clear)\b", "", text, flags=re.IGNORECASE)
+        query = re.sub(
+            r"\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d{4}-\d{2}-\d{2}|in\s+\d+\s+days?)\b",
+            "",
+            query,
+            flags=re.IGNORECASE,
+        )
+        query = re.sub(r"\b(all|everything|every|tasks?|calendar|on|for|from|the|my)\b", "", query, flags=re.IGNORECASE)
+        query = re.sub(r"\s+", " ", query).strip()
+        matching_tasks = [
+            task for task in tasks
+            if task.get("date") == target_date
+            and not task.get("completed")
+            and (wants_whole_day or _task_matches_query(task, query))
+        ]
         if not matching_tasks:
+            scope = f' matching "{query}"' if query and not wants_whole_day else ""
             return {
-                "reply": f"There are no tasks planned for {target_date} to delete.",
+                "reply": f"There are no open tasks{scope} planned for {target_date} to delete.",
                 "actions": [],
             }
         return {
-            "reply": f"Prepared deletion for all {len(matching_tasks)} task{'s' if len(matching_tasks) != 1 else ''} on {target_date}.",
+            "reply": f"Prepared deletion for {len(matching_tasks)} task{'s' if len(matching_tasks) != 1 else ''} on {target_date}.",
             "actions": [
                 {"type": "delete_task", "task_id": task.get("id")}
                 for task in matching_tasks
@@ -827,6 +1001,69 @@ def _parse_task_update(text, tasks):
     return None
 
 
+def _parse_app_command(text):
+    lowered = text.lower()
+
+    if re.search(r"\b(weather|forecast|rain|temperature|snow|sunny|wind)\b", lowered):
+        return {
+            "reply": "Checking the forecast.",
+            "actions": [{"type": "app_command", "command": "fetch_weather", "payload": {"query": text}}],
+        }
+
+    if re.search(r"\b(activity score|activity scores|act score|act scores|health score)\b", lowered):
+        if re.search(r"\b(open|show|history|list)\b", lowered):
+            return {
+                "reply": "Opening activity scores.",
+                "actions": [{"type": "app_command", "command": "open_activity_scores"}],
+            }
+        return {
+            "reply": "Loading your latest activity score.",
+            "actions": [{"type": "app_command", "command": "summarize_activity_score"}],
+        }
+
+    if re.search(r"\b(optimize|optimise|reorganize|reorganise)\b", lowered):
+        target_date = _parse_date_reference(text)
+        if target_date:
+            return {
+                "reply": f"Opening optimize for {target_date}.",
+                "actions": [{"type": "app_command", "command": "optimize_date", "payload": {"date": target_date}}],
+            }
+        return {
+            "reply": "Opening optimizer options.",
+            "actions": [{"type": "app_command", "command": "open_optimize_scope"}],
+        }
+
+    if re.search(r"\b(open|show|go to|take me to)\b", lowered):
+        command = None
+        reply = None
+        if re.search(r"\b(options|settings|profile)\b", lowered):
+            command, reply = "open_profile", "Opening profile and options."
+        elif re.search(r"\b(task history|history)\b", lowered):
+            command, reply = "open_task_history", "Opening task history."
+        elif re.search(r"\b(routines?|routine profiles?)\b", lowered):
+            command, reply = "open_routines", "Opening saved routines."
+        elif re.search(r"\b(import|calendar import)\b", lowered):
+            command, reply = "open_import_calendar", "Opening calendar import."
+        elif re.search(r"\b(statistics|stats|analytics)\b", lowered):
+            command, reply = "open_statistics", "Opening Smart Statistics."
+        elif re.search(r"\b(smart routine|routine builder)\b", lowered):
+            command, reply = "open_smart_routine", "Opening Smart Routine."
+        elif re.search(r"\b(vacation|holiday|time off)\b", lowered):
+            command, reply = "open_smart_vacation", "Opening Smart Vacation."
+        if command:
+            return {"reply": reply, "actions": [{"type": "app_command", "command": command}]}
+
+    if re.search(r"\b(plan|plans|planned|agenda|schedule|calendar|what.*on|what.*for)\b", lowered):
+        target_date = _parse_date_reference(text)
+        if target_date and _has_explicit_date(text):
+            return {
+                "reply": f"Checking the plan for {target_date}.",
+                "actions": [{"type": "app_command", "command": "summarize_calendar_date", "payload": {"date": target_date}}],
+            }
+
+    return None
+
+
 def _rule_based_response(payload):
     text = (payload.get("input") or "").strip()
     lowered = text.lower()
@@ -835,11 +1072,9 @@ def _rule_based_response(payload):
     if not text:
         return {"reply": "Tell me what you'd like to do, and I'll help turn it into a clear plan.", "actions": []}
 
-    if "optimize" in lowered or "reorganize" in lowered:
-        return {
-            "reply": "Nice work. I optimized your schedule and kept related locations together so the day should feel smoother.",
-            "actions": [{"type": "optimize_schedule"}],
-        }
+    app_command = _parse_app_command(text)
+    if app_command:
+        return app_command
 
     vacation_tasks = _parse_vacation_range(text)
     if vacation_tasks:
@@ -848,6 +1083,10 @@ def _rule_based_response(payload):
     recurring_tasks = _parse_recurring_tasks(text)
     if recurring_tasks:
         return recurring_tasks
+
+    flexible_activity_plan = _parse_flexible_activity_plan(text, tasks)
+    if flexible_activity_plan:
+        return flexible_activity_plan
 
     new_task = _parse_new_task(text)
     if new_task:
@@ -1731,6 +1970,11 @@ def chat():
         "If the user asks you to add or change a plan but key details are missing, ask a short follow-up question before taking action. "
         "Examples of missing details include date, time, and location when those details matter. "
         "For add or change requests, interpret the user's actual sentence carefully and extract the best fitting task title, date, time, duration, and location from it. "
+        "Understand compact complex requests: 'delete work tomorrow' means delete open tasks on tomorrow whose title/tags/details match work; do not claim there are no tasks unless you checked that date and subject. "
+        "'Tell me the plan for DATE' means summarize the calendar tasks for that date. "
+        "'Plan something some day next week' means choose one realistic non-overlapping open slot next week and create a preview task. "
+        "'Plan some activity once a week for a month' means create four-ish weekly tasks over the next month, choosing concrete dates/times that avoid overlaps. "
+        "'Tell me about my activity score' should answer from available app data or ask the user to open/generate Activity insights; do not create calendar tasks for that phrase. "
         "Do not use generic names if the user already implied a specific task name. "
         "Rewrite task titles so they are short, clean, well-capitalized, grammatically correct, and specific to the activity. "
         "For every created task, generate a compact one-sentence description from the user's provided information. Keep it under 140 characters and do not invent sensitive details. "
@@ -1743,7 +1987,10 @@ def chat():
         "If the user wants to add or change a task but hasn't specified enough information (such as the exact time, date, or location), ask them for it explicitly before creating or updating the task. "
         "Return valid JSON with keys reply and actions. "
         "actions must be an array. "
-        "Allowed action types are create_task, create_tasks, update_task, delete_task, and optimize_schedule. "
+        "Allowed action types are create_task, create_tasks, update_task, delete_task, optimize_schedule, and app_command. "
+        "Use app_command for app navigation or app-side information retrieval. app_command must include a command string and optional payload object. "
+        "Allowed app_command commands: open_profile, open_options, open_activity_scores, open_task_history, open_routines, open_import_calendar, open_statistics, open_smart_routine, open_smart_vacation, open_optimize_scope, optimize_date, fetch_weather, summarize_activity_score, summarize_calendar_date. "
+        "For optimize_date and summarize_calendar_date include payload.date as YYYY-MM-DD. For fetch_weather include payload.query as the user's original weather request. "
         "Only produce a create_task action when the user clearly asks to add or create a task. "
         "For a create_task action, you MUST include a 'task' object inside the action containing the fields: title, description, note, date, time, duration, location, priority, tags, and completed. "
         "Use create_tasks when the user asks for a recurring plan like every Monday, every week, or similar repeated scheduling. "
