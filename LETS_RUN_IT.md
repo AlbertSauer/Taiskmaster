@@ -37,6 +37,35 @@ Expected response:
 {"status":"ok"}
 ```
 
+## PostgreSQL
+
+Postgres runs in Docker on local port `5433`.
+
+```text
+Host: localhost
+Port: 5433
+Database: taiskmaster
+User: taiskmaster
+Password: taiskmaster
+```
+
+Useful checks:
+
+```bash
+docker compose exec -T postgres pg_isready -U taiskmaster -d taiskmaster
+docker compose exec -T postgres psql -U taiskmaster -d taiskmaster -c '\dt'
+```
+
+## PyCharm / DataGrip
+
+Use this JDBC URL for the database tool window:
+
+```text
+jdbc:postgresql://localhost:5433/taiskmaster
+```
+
+The local PyCharm project has a data source file in `.idea/dataSources.xml`, but `.idea` stays ignored by Git because it is machine-local.
+
 ## API Key Setup
 
 The backend does not use an API key from code or `.env`. Add the key inside the app:
@@ -44,7 +73,8 @@ The backend does not use an API key from code or `.env`. Add the key inside the 
 1. Register or log in.
 2. Open `Options -> Profile`.
 3. Paste the key into `OpenAI API key`.
-4. Save. The app tests the key before storing it.
+4. Use `Test API key`.
+5. Save.
 
 Without a saved profile key, Lite mode still handles supported app-manager commands, but live AI interpretation needs the saved key.
 

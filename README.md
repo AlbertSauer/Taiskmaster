@@ -2,81 +2,45 @@
 
 Taiskmaster is a smart calendar and task manager built with React, Vite, TypeScript, Tailwind, PostgreSQL, and a Flask API. It combines daily task management, calendar imports, routine generation, statistics, and an AI assistant that turns natural language into app actions.
 
-## Overview
+## What It Does
 
-The app is designed around a daily dashboard and an assistant-driven workflow. Users can manage tasks directly, import calendar events, generate routines, inspect statistics, and ask the assistant to plan, summarize, optimize, or open app tools.
+- Manage tasks with create, edit, delete, complete, search, notes, priorities, tags, dates, times, duration, and location.
+- Import calendar events and use schedule guards to avoid past dates and overlapping recommendations.
+- Use the assistant to plan, summarize, optimize, create tasks, delete tasks, and open app tools.
+- Save authenticated assistant conversations, messages, task history, routine profiles, activity scores, and AI usage in PostgreSQL.
+- Build Smart Routine plans from a questionnaire and inspect workload/activity trends in Smart Statistics.
+- Store personal OpenAI API keys per user profile; keys are tested before saving and are never returned to the frontend.
 
-## Core Features
+## Stack
 
-- Task management:
-  - Create, edit, delete, complete, and search tasks.
-  - Task descriptions and notes are stored in local state and backend records.
-  - Dashboard can switch between card/block view and compact list view.
-  - Recommendations avoid past dates and are re-fit into open, non-overlapping calendar slots before being shown.
+- Frontend: React 18, Vite, TypeScript, Tailwind, Radix UI, Recharts
+- Backend: Flask, Flask-CORS, Flask-SQLAlchemy, Pydantic, JWT auth
+- Database: PostgreSQL 16 via Docker Compose
+- Tooling: ESLint, Vitest, Vite production build
 
-- Assistant:
-  - Sends user input to the backend API by default.
-  - Converts natural language into structured commands such as `create_task`, `create_tasks`, `update_task`, `delete_task`, and `app_command`.
-  - Saves authenticated assistant chats in the backend `conversations` and `messages` tables so they can be inspected in a PostgreSQL client.
-  - Saves the user message first, then saves the assistant answer with source, status, returned actions, and related metadata.
-  - Supports complex phrases like "delete all tomorrow", "delete work tomorrow", "plan the usual routine for tomorrow", and "plan something some day next week".
-  - Falls back to Lite mode when the live AI key is missing or fails, and still shows previewable task windows for supported planning and delete commands.
-  - Uses the live AI to briefly explain how app features work logic-wise and code-wise, using a backend feature map of the main files and flows.
-  - Can open profile/options, histories, routines, statistics, calendar import, Smart Routine, Smart Vacation, and optimize dialogs.
-  - Uses English-only voice options and chooses the best available English browser voice for spoken replies.
-  - Example prompts:
-    - `Tell me what is planned tomorrow`
-    - `Delete all tomorrow`
-    - `Delete work tomorrow`
-    - `Plan the usual routine for tomorrow`
-    - `Plan something some day next week`
-    - `Plan some activity once a week for a month`
-    - `Tell me about my activity score`
-    - `Optimize today`
-    - `How does Smart Statistics work code wise?`
-    - `Explain how the routine feature works logic wise`
+## Quick Start
 
-- Smart Routine:
-  - Builds routine plans from a questionnaire.
-  - Keeps work blocks inside configured work hours.
-  - Adds sleep blocks from sleep time to wake time.
-  - Uses preferred workout time for workout tasks.
-  - Saves searchable routine profiles.
+For the short copy-paste startup guide, see [LETS_RUN_IT.md](./LETS_RUN_IT.md).
 
-- Smart Statistics:
-  - Timeframes: 1 day, 1 week, 1 month, and 1 year.
-  - Calendar workload and task category charts.
-  - Free time appears in green; work appears in black.
-  - Shows activity score history and estimated AI API cost.
-
-- Safety and profile:
-  - JWT authentication.
-  - Password changes require current password, new password, and confirmation.
-  - Personal OpenAI API keys are entered in Profile options, can be tested on demand, are tested before saving, and are never returned to the frontend.
-  - PostgreSQL is the default backend database. SQLAlchemy creates required tables on backend startup.
-
-## Run The App
-
-For the shortest copy-paste version, open [LETS_RUN_IT.md](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/LETS_RUN_IT.md).
-
-### One Terminal Fast Start
-
-Run this from the project root:
+From the project root:
 
 ```bash
 npm install
 docker compose up -d postgres
+
 cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cd ..
+
 printf 'VITE_API_URL=http://localhost:8000\n' > .env.local
 printf 'DATABASE_URL=postgresql+psycopg2://taiskmaster:taiskmaster@localhost:5433/taiskmaster\nALLOWED_ORIGINS=http://localhost:8080,http://127.0.0.1:8080\nOPENAI_MODEL=gpt-4.1-mini\nOPENAI_INPUT_COST_PER_1M=0.40\nOPENAI_OUTPUT_COST_PER_1M=1.60\nSECRET_KEY=change-this-in-production\n' > backend/.env
+
 (cd backend && source .venv/bin/activate && python run.py) & npm run dev
 ```
 
-Then open:
+Open the app:
 
 ```text
 http://localhost:8080
@@ -94,9 +58,52 @@ Expected response:
 {"status":"ok"}
 ```
 
+## Local Database
+
+The local app uses PostgreSQL from [docker-compose.yml](./docker-compose.yml):
+
+```bash
+docker compose up -d postgres
+```
+
+Default connection details:
+
+```text
+Host: localhost
+Port: 5433
+Database: taiskmaster
+User: taiskmaster
+Password: taiskmaster
+SQLAlchemy URL: postgresql+psycopg2://taiskmaster:taiskmaster@localhost:5433/taiskmaster
+JDBC URL: jdbc:postgresql://localhost:5433/taiskmaster
+```
+
+The backend reads `DATABASE_URL` from `backend/.env`. It also accepts `postgres://` and `postgresql://` URLs and normalizes them for SQLAlchemy.
+
+SQLAlchemy creates missing tables on backend startup. The expected tables are:
+
+- `users`
+- `tasks`
+- `task_history`
+- `conversations`
+- `messages`
+- `activity_scores`
+- `routine_profiles`
+- `ai_usage`
+
+### PyCharm / DataGrip
+
+Create a PostgreSQL data source with the connection details above. This workspace also has a local PyCharm data source file at `.idea/dataSources.xml`; `.idea` is intentionally ignored by Git because JetBrains project files are machine-local.
+
+### SQLite Legacy Data
+
+Older local development data may exist in `backend/instance/dev.db`. That file is ignored by Git and is not used by the app when `DATABASE_URL` points to PostgreSQL.
+
+If you need to migrate old SQLite data, back up Postgres first, then import in foreign-key order: users, tasks, conversations, messages, activity scores, task history, routine profiles, and AI usage. The current local SQLite data has already been copied into the local Postgres database.
+
 ## API Key Setup
 
-The backend no longer uses an API key from code or `.env`. Add the key inside the app:
+The backend does not use an OpenAI API key from code or `.env`. Add the key inside the app:
 
 1. Register or log in.
 2. Open `Options -> Profile`.
@@ -104,64 +111,43 @@ The backend no longer uses an API key from code or `.env`. Add the key inside th
 4. Use `Test API key` to verify a pasted key before saving.
 5. Save. The app tests the key again before storing it.
 
-If a key is already saved, `Test API key` checks the saved key without revealing it. Without a working profile key, Lite mode still handles supported app-manager commands such as bulk delete, routine planning from calendar patterns, calendar summaries, navigation, and basic scheduling previews. Full free-form AI interpretation and feature/code explanations need a working saved key.
+Without a saved profile key, Lite mode still handles supported app-manager commands such as bulk delete, routine planning from calendar patterns, calendar summaries, navigation, and basic scheduling previews. Full free-form AI interpretation and feature/code explanations need a working saved key.
 
-## Local Database
+## Useful Commands
 
-The default database is PostgreSQL. Local development uses the service in [docker-compose.yml](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/docker-compose.yml):
-
-```bash
-docker compose up -d postgres
-```
-
-Default local connection:
-
-```text
-postgresql+psycopg2://taiskmaster:taiskmaster@localhost:5433/taiskmaster
-```
-
-The backend reads `DATABASE_URL` from `backend/.env`. It also accepts `postgres://` and `postgresql://` URLs and normalizes them for SQLAlchemy.
-
-Assistant chats are saved for authenticated users in these PostgreSQL tables:
-
-- `conversations`
-- `messages`
-
-Assistant message command metadata, including returned app actions, is stored in the `messages.analysis_data` column.
-
-Useful `messages.analysis_data` fields:
-
-- `source`: `openai`, `lite`, `missing_api_key`, `api_error`, or `frontend`.
-- `kind`: message type, such as `assistant_input`, `assistant_response`, or `assistant_preview_response`.
-- `status`: processing state, such as `received`, `ok`, `missing_api_key`, or `api_error`.
-- `actions`: structured app commands returned by the assistant.
-- `request_message_id`: links an assistant reply to the user message that caused it.
-
-## Manual Start
-
-Frontend:
-
-```bash
-npm install
-printf 'VITE_API_URL=http://localhost:8000\n' > .env.local
-npm run dev
-```
-
-Backend:
+Start Postgres:
 
 ```bash
 docker compose up -d postgres
+```
+
+Start the backend:
+
+```bash
 cd backend
-python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-printf 'DATABASE_URL=postgresql+psycopg2://taiskmaster:taiskmaster@localhost:5433/taiskmaster\nALLOWED_ORIGINS=http://localhost:8080,http://127.0.0.1:8080\nOPENAI_MODEL=gpt-4.1-mini\nOPENAI_INPUT_COST_PER_1M=0.40\nOPENAI_OUTPUT_COST_PER_1M=1.60\nSECRET_KEY=change-this-in-production\n' > .env
 python run.py
 ```
 
-Existing SQLite data is not migrated automatically. If you need to keep old development data, export it from the SQLite database first and import it into PostgreSQL.
+Start the frontend:
 
-## Checks
+```bash
+npm run dev
+```
+
+Check Postgres health:
+
+```bash
+docker compose exec -T postgres pg_isready -U taiskmaster -d taiskmaster
+```
+
+List database tables:
+
+```bash
+docker compose exec -T postgres psql -U taiskmaster -d taiskmaster -c '\dt'
+```
+
+Run project checks:
 
 ```bash
 npm run lint
@@ -171,6 +157,23 @@ python3 -B -c 'import ast, pathlib; files=["backend/app/main.py","backend/app/au
 ```
 
 Current known lint note: `src/hooks/useAuth.tsx` has the existing React Fast Refresh warning because the file exports both the provider and hook.
+
+## Assistant Data
+
+Authenticated assistant chats are saved in:
+
+- `conversations`
+- `messages`
+
+Assistant metadata, including returned app actions, is stored in `messages.analysis_data`.
+
+Useful `messages.analysis_data` fields:
+
+- `source`: `openai`, `lite`, `missing_api_key`, `api_error`, or `frontend`
+- `kind`: message type, such as `assistant_input`, `assistant_response`, or `assistant_preview_response`
+- `status`: processing state, such as `received`, `ok`, `missing_api_key`, or `api_error`
+- `actions`: structured app commands returned by the assistant
+- `request_message_id`: links an assistant reply to the user message that caused it
 
 ## Project Map
 
@@ -187,5 +190,5 @@ Current known lint note: `src/hooks/useAuth.tsx` has the existing React Fast Ref
 - `backend/app/chat_api.py`: assistant, non-overlapping recommendations, optimization, activity insights, routines, usage routes.
 - `backend/app/tasks_api.py`: backend task CRUD and task history.
 - `backend/app/models.py`: SQLAlchemy models.
-- `docker-compose.yml`: local PostgreSQL service.
 - `backend/app/ai_usage.py`: AI token and cost tracking.
+- `docker-compose.yml`: local PostgreSQL service.
