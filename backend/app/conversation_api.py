@@ -32,6 +32,12 @@ conversation_bp = Blueprint("conversation", __name__)
 MAX_HISTORY_MESSAGES = 10
 
 
+def _request_openai_api_key():
+    current_user = getattr(request, "current_user", None)
+    user_key = str(getattr(current_user, "openai_api_key", "") or "").strip()
+    return user_key or None
+
+
 def get_models():
     from app.models import Conversation, Message, User, db
 
@@ -236,7 +242,7 @@ def call_openai_for_analysis(
     conversation_history: List[Dict[str, str]],
     technique: str,
 ) -> ComparativeAnalysis:
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = _request_openai_api_key()
     if not api_key:
         return build_fallback_analysis(user_message, use_case, conversation_history, technique)
 

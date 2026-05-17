@@ -14,6 +14,7 @@ class User(db.Model):
     username = db.Column(db.String(255), unique=True, nullable=False, index=True)
     hashed_password = db.Column(db.String(255), nullable=False)
     full_name = db.Column(db.String(255), nullable=True)
+    openai_api_key = db.Column(db.Text, nullable=True)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 

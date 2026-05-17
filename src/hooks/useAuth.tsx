@@ -5,9 +5,19 @@ interface User {
   email: string;
   username: string;
   full_name?: string;
+  has_openai_api_key?: boolean;
   is_active: boolean;
   created_at: string;
 }
+
+type ProfileUpdates = {
+  email?: string;
+  username?: string;
+  full_name?: string;
+  password?: string;
+  current_password?: string;
+  openai_api_key?: string;
+};
 
 interface AuthContextType {
   user: User | null;
@@ -15,7 +25,7 @@ interface AuthContextType {
   isLoading: boolean;
   login: (username: string, password: string) => Promise<void>;
   register: (email: string, username: string, password: string, fullName?: string) => Promise<void>;
-  updateProfile: (updates: { email?: string; username?: string; full_name?: string; password?: string; current_password?: string }) => Promise<void>;
+  updateProfile: (updates: ProfileUpdates) => Promise<void>;
   deleteAccount: () => Promise<void>;
   logout: () => void;
   isAuthenticated: boolean;
@@ -133,7 +143,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem("authToken");
   };
 
-  const updateProfile = async (updates: { email?: string; username?: string; full_name?: string; password?: string; current_password?: string }) => {
+  const updateProfile = async (updates: ProfileUpdates) => {
     const authToken = token || localStorage.getItem("authToken");
     if (!authToken) throw new Error("Not authenticated");
 

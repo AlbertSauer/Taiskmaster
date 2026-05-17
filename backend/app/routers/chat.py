@@ -1,13 +1,9 @@
-import json
-import os
 import re
 from datetime import datetime, timedelta
 from typing import Any, List, Literal, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
-from openai import OpenAI
-
 router = APIRouter()
 
 
@@ -390,88 +386,11 @@ def chat(payload: ChatPayload):
     if rule_based:
         return rule_based
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not configured")
-
-    client = OpenAI(api_key=api_key)
-
-    task_context = _build_task_context(payload.tasks)
-    instructions = (
-        "You are an expert scheduling assistant for a task manager app. "
-        "Your job is to be excellent at prioritizing, time-blocking, sequencing work, and turning vague plans into realistic next steps. "
-        "Use the provided task list as context and answer the user's request clearly and concisely. "
-        "Your tone should be motivating, warm, and friendly without sounding cheesy. "
-        "Encourage the user, reduce overwhelm, and help them feel confident about the plan. "
-        "When the user uses relative dates like today, tomorrow, or in 3 days, calculate them exactly from the provided current date. "
-        "Do not invent tasks unless the user explicitly asks to add one. "
-        "If the user asks to change tasks, describe the change you would make, but only the explicit action payload can mutate state."
+    return ChatResponse(
+        reply="Add an API key in Profile options to enable live AI. I can still help with planning, adding tasks, and basic schedule questions."
     )
-    prompt = (
-        f"Current date: {datetime.now().strftime('%Y-%m-%d')}.\n"
-        f"Current tasks:\n{task_context if task_context else '- No tasks yet'}\n\n"
-        f"User: {payload.input}"
-    )
-
-    try:
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": instructions},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=250,
-            temperature=0.7,
-        )
-
-        reply = completion.choices[0].message.content.strip()
-        return {"reply": reply, "actions": []}
-    except Exception:
-        return ChatResponse(
-            reply="I'm having trouble reaching the live AI right now, but I can still help with planning, adding tasks, and basic schedule questions."
-        )
 
 
 @router.post("/recommendations", response_model=RecommendationResponse)
 def recommendations(payload: ChatPayload):
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return _recommendation_fallback(payload.tasks)
-
-    client = OpenAI(api_key=api_key)
-    task_context = _build_task_context(payload.tasks)
-    today = datetime.now().strftime("%Y-%m-%d")
-    instructions = (
-        "You are an expert scheduling assistant for a task manager app. "
-        "Review the schedule and propose 3 to 4 high-value recommendations. "
-        "Recommendations should balance obligations with missing personal priorities. "
-        "Think like a strong planner who protects focus, energy, motivation, and realistic pacing. "
-        "Always check for underrepresented areas like family time, sports or exercise, health, recovery, hobbies, meditation, reading, studying, and fun activities. "
-        "Return valid JSON with a single key named recommendations. "
-        "Each recommendation must include title, reason, category, and suggested_task. "
-        "Valid categories are: schedule, family, sports, health, recovery, personal, hobbies, meditation, reading, studying, fun. "
-        "suggested_task must be either null or an object with title, description, date, time, duration, location, priority, tags, and completed. "
-        "Use realistic near-future dates after today. Keep reasons concise and specific to the schedule."
-    )
-    prompt = (
-        f"Today is {today}.\n"
-        f"Current tasks:\n{task_context if task_context else '- No tasks yet'}\n\n"
-        "Generate recommendations based on the existing calendar and any important missing plans."
-    )
-
-    try:
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": instructions},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=700,
-            temperature=0.6,
-        )
-        content = completion.choices[0].message.content or "{}"
-        parsed = json.loads(content)
-        return RecommendationResponse(**parsed)
-    except Exception:
-        return _recommendation_fallback(payload.tasks)
+    return _recommendation_fallback(payload.tasks)

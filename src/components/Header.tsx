@@ -1,4 +1,4 @@
-import { ListTodo, LogOut, Settings, Trash2, UserCircle2, BarChart3, UploadCloud, Sparkles, Palette, Sun, Moon, History, Repeat } from "lucide-react";
+import { ListTodo, LogOut, Settings, Trash2, UserCircle2, BarChart3, UploadCloud, Sparkles, Palette, Sun, Moon, History, Repeat, KeyRound } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTheme } from "next-themes";
 import { Button } from "@/components/ui/button";
@@ -48,6 +48,8 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
     current_password: "",
     password: "",
     confirm_password: "",
+    openai_api_key: "",
+    change_openai_api_key: false,
   });
 
   useEffect(() => {
@@ -95,6 +97,8 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
       current_password: "",
       password: "",
       confirm_password: "",
+      openai_api_key: "",
+      change_openai_api_key: !user?.has_openai_api_key,
     });
     setProfileOpen(true);
   };
@@ -108,18 +112,21 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
         current_password: "",
         password: "",
         confirm_password: "",
+        openai_api_key: "",
+        change_openai_api_key: !user?.has_openai_api_key,
       });
       setProfileOpen(true);
     };
     window.addEventListener("taiskmaster:open-profile", openProfile);
     return () => window.removeEventListener("taiskmaster:open-profile", openProfile);
-  }, [user?.email, user?.full_name, user?.username]);
+  }, [user?.email, user?.full_name, user?.has_openai_api_key, user?.username]);
 
   const handleSaveProfile = async () => {
     if (!user) return;
     try {
       setProfileSaving(true);
       const wantsPasswordChange = Boolean(profileForm.password.trim() || profileForm.confirm_password.trim() || profileForm.current_password.trim());
+      const willTestApiKey = profileForm.change_openai_api_key && Boolean(profileForm.openai_api_key.trim());
       if (wantsPasswordChange) {
         if (!profileForm.current_password.trim()) {
           toast.error("Enter your current password before changing it.");
@@ -134,10 +141,16 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
           return;
         }
       }
+      if (willTestApiKey) {
+        toast.info("Testing API key before saving...");
+      }
       await updateProfile({
         email: profileForm.email.trim(),
         username: profileForm.username.trim(),
         full_name: profileForm.full_name.trim(),
+        ...(profileForm.change_openai_api_key ? {
+          openai_api_key: profileForm.openai_api_key.trim(),
+        } : {}),
         ...(wantsPasswordChange ? {
           current_password: profileForm.current_password,
           password: profileForm.password.trim(),
@@ -287,7 +300,7 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
       </div>
 
       <Dialog open={profileOpen} onOpenChange={setProfileOpen}>
-        <DialogContent className="sm:max-w-[460px]">
+        <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-[460px]">
           <DialogHeader>
             <DialogTitle>Profile</DialogTitle>
             <DialogDescription>View and update your account information.</DialogDescription>
@@ -386,6 +399,40 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
                   Delete account
                 </Button>
               </div>
+            </div>
+            <div className="space-y-2 rounded-lg border border-border/70 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="profile-openai-api-key" className="flex items-center gap-2">
+                  <KeyRound className="h-4 w-4" />
+                  OpenAI API key
+                </Label>
+                {user?.has_openai_api_key && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setProfileForm((current) => ({
+                      ...current,
+                      openai_api_key: "",
+                      change_openai_api_key: !current.change_openai_api_key,
+                    }))}
+                    disabled={profileSaving}
+                  >
+                    {profileForm.change_openai_api_key ? "Keep saved key" : "Change key"}
+                  </Button>
+                )}
+              </div>
+              <Input
+                id="profile-openai-api-key"
+                type="password"
+                value={profileForm.openai_api_key}
+                onChange={(e) => setProfileForm((current) => ({ ...current, openai_api_key: e.target.value }))}
+                placeholder={user?.has_openai_api_key ? "Personal key saved" : "Paste your API key"}
+                disabled={profileSaving || (Boolean(user?.has_openai_api_key) && !profileForm.change_openai_api_key)}
+              />
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                Personal keys are tested before saving and used for your AI requests. Saved keys are not shown again; clear the field while changing to remove your saved key.
+              </p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="profile-current-password">Current password</Label>

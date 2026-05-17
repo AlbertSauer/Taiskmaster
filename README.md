@@ -7,6 +7,7 @@ Taiskmaster is a React + Vite + TypeScript + Tailwind frontend with a Flask back
 - Daily dashboard with:
   - today-focused task view (default),
   - date picker filter + broad text search across title, description, notes, tags, date, priority, status, time, and location,
+  - switchable task display: card/block view or compact list view,
   - task cards showing time ranges (`from - to`),
   - separate task notes below descriptions,
   - live window (ongoing/upcoming + countdown + next-up preview),
@@ -78,15 +79,35 @@ Taiskmaster is a React + Vite + TypeScript + Tailwind frontend with a Flask back
   - phone-safe options menu layout.
 - Data and auth:
   - JWT auth,
+  - profile password changes require current password, new password, and confirmation,
+  - Profile options include a personal OpenAI API key field; keys are tested before saving, used for that user's AI requests, and secrets are never echoed back to the frontend,
   - SQLite models for users/tasks/messages/activity scores/routine profiles/history/AI usage,
   - `Task.note` is stored in local storage and backend task records,
-  - startup migration adds the `tasks.note` column for existing SQLite databases when needed.
+  - startup migration adds the `tasks.note` and `users.openai_api_key` columns for existing SQLite databases when needed.
 - AI usage tracking:
   - authenticated OpenAI calls record prompt/completion tokens when the provider returns usage,
   - estimated costs are based on built-in model pricing,
   - override pricing with `OPENAI_INPUT_COST_PER_1M` and `OPENAI_OUTPUT_COST_PER_1M` when needed.
 
 ## Run Locally
+
+### Fast Start
+
+Copy and paste this into a terminal from the project root to install dependencies, prepare the backend virtual environment, and start both servers:
+
+```bash
+npm install
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cd ..
+(cd backend && source .venv/bin/activate && python run.py) & npm run dev
+```
+
+The backend runs on `http://localhost:8000`. The frontend starts on `http://localhost:8080`; if that port is busy, Vite will print the next available localhost URL.
+
+### Manual Start
 
 Install frontend dependencies:
 
@@ -127,7 +148,6 @@ Create `backend/.env`:
 ```env
 DATABASE_URL=sqlite:///./dev.db
 ALLOWED_ORIGINS=http://localhost:8080
-OPENAI_API_KEY=your-provider-api-key
 OPENAI_MODEL=gpt-4.1-mini
 OPENAI_INPUT_COST_PER_1M=0.40
 OPENAI_OUTPUT_COST_PER_1M=1.60
@@ -135,6 +155,7 @@ SECRET_KEY=change-this-in-production
 ```
 
 If `VITE_API_URL` is not set, the frontend falls back to local storage.
+AI features use the API key saved in `Profile -> OpenAI API key`; personal keys are tested before saving, and the saved secret is not returned to the frontend.
 The cost override variables are optional; omit them to use the built-in pricing table.
 
 ## Checks
@@ -143,6 +164,12 @@ The cost override variables are optional; omit them to use the built-in pricing 
 npm run lint
 npm test
 npm run build
+```
+
+Backend syntax check without writing Python bytecode:
+
+```bash
+python3 -B -c 'import ast, pathlib; files=["backend/app/main.py","backend/app/auth.py","backend/app/models.py","backend/app/schemas.py","backend/app/tasks_api.py","backend/app/chat_api.py"]; [ast.parse(pathlib.Path(f).read_text(), filename=f) for f in files]; print("python syntax ok")'
 ```
 
 Backend health check:
@@ -170,6 +197,7 @@ Expected response:
 - [src/lib/scheduleGuards.ts](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/lib/scheduleGuards.ts): protected work-time detection, conflict checks, and safe rescheduling helpers
 - [src/lib/taskStore.ts](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/src/lib/taskStore.ts): shared task state, auto-tags, local optimization rules
 - [backend/app/ai_usage.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/ai_usage.py): token usage capture and estimated API cost summaries
+- [backend/app/auth.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/auth.py): JWT auth, profile updates, current-password verification for password changes
 - [backend/app/chat_api.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/chat_api.py): AI endpoints (assistant/recommendations/optimize/routine/insights) and guard rails
 - [backend/app/tasks_api.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/tasks_api.py): task CRUD + history
 - [backend/app/models.py](/Users/albertsauer/Desktop/TaiskmasterV2/TaiskmasterVR/backend/app/models.py): DB models (`Task`, `TaskHistory`, `ActivityScore`, `RoutineProfile`, `AIUsage`, etc.)

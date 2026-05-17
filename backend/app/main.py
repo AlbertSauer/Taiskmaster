@@ -49,6 +49,11 @@ with app.app_context():
         if "note" not in task_columns:
             with db.engine.begin() as connection:
                 connection.execute(text("ALTER TABLE tasks ADD COLUMN note TEXT"))
+    if "users" in inspector.get_table_names():
+        user_columns = {column["name"] for column in inspector.get_columns("users")}
+        if "openai_api_key" not in user_columns:
+            with db.engine.begin() as connection:
+                connection.execute(text("ALTER TABLE users ADD COLUMN openai_api_key TEXT"))
 
 # Import and register blueprints
 from app.auth import auth_bp

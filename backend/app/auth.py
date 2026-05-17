@@ -2,8 +2,20 @@ from flask import Blueprint, request, jsonify
 from datetime import timedelta
 import uuid
 from functools import wraps
+from openai import OpenAI
 
 auth_bp = Blueprint('auth', __name__)
+
+
+def test_openai_api_key(api_key):
+    try:
+        OpenAI(api_key=api_key, timeout=8.0).models.list()
+        return True, None
+    except Exception as exc:
+        message = str(exc).strip() or "API key test failed"
+        if len(message) > 180:
+            message = message[:177].rstrip() + "..."
+        return False, message
 
 def get_models():
     from app.models import User, db
@@ -55,7 +67,7 @@ def register():
     if not all([email, username, password]):
         return jsonify({"detail": "Email, username, and password are required"}), 400
 
-    User, db, verify_password, get_password_hash, create_access_token, _ = get_models()
+    User, db, _, get_password_hash, create_access_token, _ = get_models()
 
     # Check if user already exists
     existing_user = db.session.query(User).filter(
@@ -131,6 +143,7 @@ def get_current_user():
         "email": user.email,
         "username": user.username,
         "full_name": user.full_name,
+        "has_openai_api_key": bool(user.openai_api_key),
         "is_active": user.is_active,
         "created_at": user.created_at.isoformat()
     }), 200
@@ -143,13 +156,14 @@ def update_current_user():
     data = request.get_json() or {}
     user = request.current_user
 
-    User, db, _, get_password_hash, create_access_token, _ = get_models()
+    User, db, verify_password, get_password_hash, create_access_token, _ = get_models()
 
     email = data.get("email")
     username = data.get("username")
     full_name = data.get("full_name")
     password = data.get("password")
     current_password = data.get("current_password")
+    openai_api_key = data.get("openai_api_key") if "openai_api_key" in data else None
 
     if email is not None:
         email = str(email).strip()
@@ -184,6 +198,16 @@ def update_current_user():
             return jsonify({"detail": "Password must be at least 8 characters"}), 400
         user.hashed_password = get_password_hash(password)
 
+    if "openai_api_key" in data:
+        cleaned_key = str(openai_api_key or "").strip()
+        if cleaned_key and len(cleaned_key) < 20:
+            return jsonify({"detail": "API key looks too short"}), 400
+        if cleaned_key:
+            key_works, key_error = test_openai_api_key(cleaned_key)
+            if not key_works:
+                return jsonify({"detail": f"API key test failed: {key_error}"}), 400
+        user.openai_api_key = cleaned_key or None
+
     db.session.commit()
 
     access_token_expires = timedelta(days=7)
@@ -199,6 +223,7 @@ def update_current_user():
             "email": user.email,
             "username": user.username,
             "full_name": user.full_name,
+            "has_openai_api_key": bool(user.openai_api_key),
             "is_active": user.is_active,
             "created_at": user.created_at.isoformat(),
         }

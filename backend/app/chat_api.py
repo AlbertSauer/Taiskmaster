@@ -45,6 +45,33 @@ MONTH_LOOKUP = {
 PRIORITY_VALUES = ("very-low", "low", "medium", "high", "urgent")
 
 
+def _request_openai_api_key():
+    current_user = getattr(request, "current_user", None)
+    if current_user is not None:
+        user_key = str(getattr(current_user, "openai_api_key", "") or "").strip()
+        if user_key:
+            return user_key
+
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        try:
+            from app.models import User, db
+            from app.security import decode_access_token
+
+            token_data = decode_access_token(auth_header.split(" ", 1)[1])
+            if token_data is not None:
+                user = db.session.query(User).filter(User.username == token_data.username).first()
+                if user is not None:
+                    request.current_user = user
+                    user_key = str(user.openai_api_key or "").strip()
+                    if user_key:
+                        return user_key
+        except Exception:
+            pass
+
+    return None
+
+
 def _infer_priority(text):
     lowered = text.lower()
     if re.search(r"\b(urgent|asap|immediately|critical|emergency|deadline|due today|must)\b", lowered):
@@ -1676,7 +1703,7 @@ def _enforce_routine_time_relations(tasks, questionnaire):
 def chat():
     payload = request.get_json(silent=True) or {}
     user_input = payload.get("input", "")
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = _request_openai_api_key()
     rule_based = _rule_based_response(payload)
     if rule_based and rule_based.get("actions") and _should_use_rule_based_before_ai(rule_based):
         return jsonify(rule_based), 200
@@ -1869,7 +1896,7 @@ def recommendations():
             if len(recommendations) >= 3:
                 break
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = _request_openai_api_key()
     if api_key:
         try:
             client = OpenAI(api_key=api_key)
@@ -1934,7 +1961,7 @@ def optimize_schedule_ai():
     if len(tasks) == 0:
         return jsonify({"tasks": []}), 200
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = _request_openai_api_key()
     if not api_key:
         return jsonify({"tasks": _enhance_tasks_fallback(tasks)}), 200
 
@@ -1997,7 +2024,7 @@ def activity_insights():
         return jsonify({"detail": "tasks must be an array"}), 400
 
     insights = _activity_insights_fallback(tasks)
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = _request_openai_api_key()
     if not api_key:
         return jsonify(insights), 200
 
@@ -2129,7 +2156,7 @@ def routine_plan():
     fallback_tasks = _generate_routine_fallback(end_date, questionnaire)
     generated_tasks = fallback_tasks
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = _request_openai_api_key()
     if api_key:
         try:
             client = OpenAI(api_key=api_key)
