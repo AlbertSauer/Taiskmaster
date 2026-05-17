@@ -15,7 +15,7 @@ interface AuthContextType {
   isLoading: boolean;
   login: (username: string, password: string) => Promise<void>;
   register: (email: string, username: string, password: string, fullName?: string) => Promise<void>;
-  updateProfile: (updates: { email?: string; username?: string; full_name?: string; password?: string }) => Promise<void>;
+  updateProfile: (updates: { email?: string; username?: string; full_name?: string; password?: string; current_password?: string }) => Promise<void>;
   deleteAccount: () => Promise<void>;
   logout: () => void;
   isAuthenticated: boolean;
@@ -133,7 +133,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     localStorage.removeItem("authToken");
   };
 
-  const updateProfile = async (updates: { email?: string; username?: string; full_name?: string; password?: string }) => {
+  const updateProfile = async (updates: { email?: string; username?: string; full_name?: string; password?: string; current_password?: string }) => {
     const authToken = token || localStorage.getItem("authToken");
     if (!authToken) throw new Error("Not authenticated");
 

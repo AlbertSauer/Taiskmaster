@@ -30,6 +30,13 @@ import { differenceInCalendarDays, format, isAfter, isBefore, parseISO, startOfD
 import { Header } from "@/components/Header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useAuth } from "@/hooks/useAuth";
 import { useTasks, fetchTaskHistory } from "@/lib/taskStore";
 import type { Task } from "@/types/task";
@@ -77,8 +84,25 @@ interface AIUsageSummary {
   by_day: AIUsageDay[];
 }
 
-const CALENDAR_WINDOW_DAYS = 14;
 const PLANNING_DAY_MINUTES = 14 * 60;
+type StatisticsRange = "1d" | "1w" | "1m" | "1y";
+const RANGE_OPTIONS: Record<StatisticsRange, { label: string; days: number; chartPoints: number }> = {
+  "1d": { label: "1 day", days: 1, chartPoints: 1 },
+  "1w": { label: "1 week", days: 7, chartPoints: 7 },
+  "1m": { label: "1 month", days: 30, chartPoints: 30 },
+  "1y": { label: "1 year", days: 365, chartPoints: 52 },
+};
+const CATEGORY_COLORS: Record<string, string> = {
+  Work: "hsl(0 0% 0%)",
+  Sleep: "hsl(231 62% 54%)",
+  Health: "hsl(174 62% 40%)",
+  Learning: "hsl(var(--primary))",
+  Travel: "hsl(var(--warning))",
+  Personal: "hsl(var(--priority-high))",
+  Errands: "hsl(var(--priority-low))",
+  General: "hsl(var(--muted-foreground))",
+  "Free time": "hsl(var(--success))",
+};
 
 const formatPercent = (value: number) => `${Math.round(value)}%`;
 const formatMoney = (value: number) => `$${value.toFixed(value > 1 ? 2 : 4)}`;
@@ -94,6 +118,7 @@ const getTaskCategory = (task: Task) => {
   const tags = (task.tags ?? []).map((tag) => tag.toLowerCase());
   const text = `${task.title} ${task.description ?? ""} ${task.note ?? ""} ${task.location ?? ""}`.toLowerCase();
   if (tags.includes("work") || /\b(work|meeting|project|client|office)\b/.test(text)) return "Work";
+  if (tags.includes("sleep") || /\b(sleep|nap|rest)\b/.test(text)) return "Sleep";
   if (tags.includes("health") || /\b(gym|run|doctor|workout|health|therapy)\b/.test(text)) return "Health";
   if (tags.includes("learning") || /\b(study|course|read|learn|exam)\b/.test(text)) return "Learning";
   if (tags.includes("travel") || /\b(flight|train|travel|trip|commute)\b/.test(text)) return "Travel";
@@ -141,6 +166,8 @@ const SmartStatistics = () => {
   const [taskHistory, setTaskHistory] = useState<TaskHistoryItem[]>([]);
   const [aiUsage, setAiUsage] = useState<AIUsageSummary | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [selectedRange, setSelectedRange] = useState<StatisticsRange>("1m");
+  const rangeConfig = RANGE_OPTIONS[selectedRange];
 
   const fetchRemoteStats = useCallback(async () => {
     if (!API_BASE || !token) return;
@@ -150,7 +177,7 @@ const SmartStatistics = () => {
       const [scoresResponse, historyResponse, usageResponse] = await Promise.all([
         fetch(`${API_BASE}/api/chat/activity-scores`, { headers }),
         fetch(`${API_BASE}/api/tasks/history`, { headers }),
-        fetch(`${API_BASE}/api/chat/ai-usage?days=30`, { headers }),
+        fetch(`${API_BASE}/api/chat/ai-usage?days=${rangeConfig.days}`, { headers }),
       ]);
 
       if (scoresResponse.ok) {
@@ -167,7 +194,7 @@ const SmartStatistics = () => {
     } finally {
       setIsRefreshing(false);
     }
-  }, [token]);
+  }, [rangeConfig.days, token]);
 
   const loadTaskHistory = useCallback(async () => {
     try {
@@ -182,26 +209,32 @@ const SmartStatistics = () => {
     void fetchRemoteStats();
   }, [fetchRemoteStats]);
 
+  const rangeStart = useMemo(() => startOfDay(subDays(new Date(), rangeConfig.days - 1)), [rangeConfig.days]);
+  const rangeEnd = useMemo(() => startOfDay(new Date()), []);
+  const rangeTasks = useMemo(() => tasks.filter((task) => {
+    const date = parseTaskDate(task);
+    return date && !isBefore(startOfDay(date), rangeStart) && !isAfter(startOfDay(date), rangeEnd);
+  }), [rangeEnd, rangeStart, tasks]);
+
   const stats = useMemo(() => {
     const today = startOfDay(new Date());
     const nextWeek = subDays(today, -7);
-    const lastMonth = subDays(today, 30);
-    const completed = tasks.filter((task) => task.completed);
-    const overdue = tasks.filter((task) => {
+    const completed = rangeTasks.filter((task) => task.completed);
+    const overdue = rangeTasks.filter((task) => {
       const date = parseTaskDate(task);
       return date && isBefore(date, today) && !task.completed;
     });
-    const upcoming = tasks.filter((task) => {
+    const upcoming = rangeTasks.filter((task) => {
       const date = parseTaskDate(task);
       return date && !isBefore(date, today) && !isAfter(date, nextWeek);
     });
-    const recentCreated = tasks.filter((task) => {
+    const recentCreated = rangeTasks.filter((task) => {
       const created = parseISO(task.createdAt);
-      return !Number.isNaN(created.getTime()) && !isBefore(created, lastMonth);
+      return !Number.isNaN(created.getTime()) && !isBefore(created, rangeStart);
     });
-    const totalMinutes = tasks.reduce((total, task) => total + minutesForTask(task), 0);
-    const scheduledDates = new Set(tasks.map((task) => task.date));
-    const completionRate = tasks.length ? (completed.length / tasks.length) * 100 : 0;
+    const totalMinutes = rangeTasks.reduce((total, task) => total + minutesForTask(task), 0);
+    const scheduledDates = new Set(rangeTasks.map((task) => task.date));
+    const completionRate = rangeTasks.length ? (completed.length / rangeTasks.length) * 100 : 0;
 
     return {
       completionRate,
@@ -210,38 +243,38 @@ const SmartStatistics = () => {
       recentCreated: recentCreated.length,
       totalHours: totalMinutes / 60,
       scheduledDays: scheduledDates.size,
-      avgTasksPerDay: scheduledDates.size ? tasks.length / scheduledDates.size : 0,
+      avgTasksPerDay: scheduledDates.size ? rangeTasks.length / scheduledDates.size : 0,
     };
-  }, [tasks]);
+  }, [rangeStart, rangeTasks]);
 
   const dailyLoad = useMemo(() => {
     const today = startOfDay(new Date());
-    return Array.from({ length: CALENDAR_WINDOW_DAYS }, (_, index) => {
-      const date = subDays(today, 6 - index);
-      const iso = format(date, "yyyy-MM-dd");
-      const dayTasks = tasks.filter((task) => task.date === iso);
+    const bucketDays = Math.max(1, Math.ceil(rangeConfig.days / rangeConfig.chartPoints));
+    const bucketCount = Math.ceil(rangeConfig.days / bucketDays);
+    return Array.from({ length: bucketCount }, (_, index) => {
+      const remainingBuckets = bucketCount - 1 - index;
+      const bucketEnd = subDays(today, remainingBuckets * bucketDays);
+      const bucketStart = subDays(bucketEnd, bucketDays - 1);
+      const dayTasks = rangeTasks.filter((task) => {
+        const date = parseTaskDate(task);
+        return date && !isBefore(startOfDay(date), bucketStart) && !isAfter(startOfDay(date), bucketEnd);
+      });
       return {
-        date: format(date, "MMM d"),
+        date: bucketDays === 1 ? format(bucketEnd, "MMM d") : `${format(bucketStart, "MMM d")} - ${format(bucketEnd, "MMM d")}`,
         tasks: dayTasks.length,
         hours: Number((dayTasks.reduce((total, task) => total + minutesForTask(task), 0) / 60).toFixed(1)),
       };
     });
-  }, [tasks]);
+  }, [rangeConfig.chartPoints, rangeConfig.days, rangeTasks]);
 
   const categoryMix = useMemo(() => {
-    const today = startOfDay(new Date());
-    const visibleDates = new Set(
-      Array.from({ length: CALENDAR_WINDOW_DAYS }, (_, index) => format(subDays(today, 6 - index), "yyyy-MM-dd")),
-    );
-    const colors = ["hsl(var(--primary))", "hsl(var(--success))", "hsl(var(--warning))", "hsl(var(--priority-low))", "hsl(var(--priority-high))", "hsl(var(--muted-foreground))"];
     const byCategory = new Map<string, number>();
-    const visibleTasks = tasks.filter((task) => visibleDates.has(task.date));
-    visibleTasks.forEach((task) => {
+    rangeTasks.forEach((task) => {
       const category = getTaskCategory(task);
       byCategory.set(category, (byCategory.get(category) ?? 0) + minutesForTask(task));
     });
-    const scheduledMinutes = visibleTasks.reduce((total, task) => total + minutesForTask(task), 0);
-    const freeMinutes = Math.max(0, (CALENDAR_WINDOW_DAYS * PLANNING_DAY_MINUTES) - scheduledMinutes);
+    const scheduledMinutes = rangeTasks.reduce((total, task) => total + minutesForTask(task), 0);
+    const freeMinutes = Math.max(0, (rangeConfig.days * PLANNING_DAY_MINUTES) - scheduledMinutes);
     if (freeMinutes > 0) {
       byCategory.set("Free time", freeMinutes);
     }
@@ -251,55 +284,66 @@ const SmartStatistics = () => {
       .map(([name, minutes], index) => ({
         name,
         hours: Number((minutes / 60).toFixed(1)),
-        color: name === "Free time" ? "hsl(var(--success))" : name === "Work" ? "hsl(0 0% 0%)" : colors[index % colors.length],
+        color: CATEGORY_COLORS[name] ?? `hsl(${(index * 47) % 360} 62% 48%)`,
       }));
-  }, [tasks]);
+  }, [rangeConfig.days, rangeTasks]);
 
   const aiCostTrend = useMemo(() => {
     const today = startOfDay(new Date());
     const costByDate = new Map((aiUsage?.by_day ?? []).map((day) => [day.date, day.cost_usd]));
-    return Array.from({ length: CALENDAR_WINDOW_DAYS }, (_, index) => {
-      const date = subDays(today, CALENDAR_WINDOW_DAYS - 1 - index);
-      const iso = format(date, "yyyy-MM-dd");
+    const bucketDays = Math.max(1, Math.ceil(rangeConfig.days / rangeConfig.chartPoints));
+    const bucketCount = Math.ceil(rangeConfig.days / bucketDays);
+    return Array.from({ length: bucketCount }, (_, index) => {
+      const remainingBuckets = bucketCount - 1 - index;
+      const bucketEnd = subDays(today, remainingBuckets * bucketDays);
+      const bucketStart = subDays(bucketEnd, bucketDays - 1);
+      let cost = 0;
+      for (let offset = 0; offset < bucketDays; offset += 1) {
+        const date = subDays(bucketEnd, offset);
+        if (isBefore(date, bucketStart)) continue;
+        cost += costByDate.get(format(date, "yyyy-MM-dd")) ?? 0;
+      }
       return {
-        date: format(date, "MMM d"),
-        cost: Number((costByDate.get(iso) ?? 0).toFixed(5)),
+        date: bucketDays === 1 ? format(bucketEnd, "MMM d") : `${format(bucketStart, "MMM d")} - ${format(bucketEnd, "MMM d")}`,
+        cost: Number(cost.toFixed(5)),
       };
     });
-  }, [aiUsage]);
+  }, [aiUsage, rangeConfig.chartPoints, rangeConfig.days]);
 
   const activityTrend = useMemo(() => {
-    if (activityScores.length === 0) {
+    const scoresInRange = activityScores.filter((score) => {
+      const created = parseISO(score.created_at);
+      return !Number.isNaN(created.getTime()) && !isBefore(created, rangeStart);
+    });
+    if (scoresInRange.length === 0) {
       return [{ date: "No scores", score: 0 }];
     }
-    return [...activityScores]
+    return [...scoresInRange]
       .reverse()
-      .slice(-14)
+      .slice(-rangeConfig.chartPoints)
       .map((score) => ({
         date: format(parseISO(score.created_at), "MMM d"),
         score: score.health_score,
       }));
-  }, [activityScores]);
+  }, [activityScores, rangeConfig.chartPoints, rangeStart]);
 
   const taskHistorySummary = useMemo(() => {
-    const since = subDays(new Date(), 30);
-    const recent = taskHistory.filter((item) => !isBefore(parseISO(item.created_at), since));
+    const recent = taskHistory.filter((item) => !isBefore(parseISO(item.created_at), rangeStart));
     return {
       created: recent.filter((item) => item.action === "created").length,
       updated: recent.filter((item) => item.action === "updated").length,
       deleted: recent.filter((item) => item.action === "deleted").length,
     };
-  }, [taskHistory]);
+  }, [rangeStart, taskHistory]);
 
   const recentAddedTasks = useMemo(() => {
-    const since = subDays(new Date(), 30);
     const grouped = new Map<string, { title: string; count: number; latest: Date }>();
 
     taskHistory
       .filter((item) => item.action === "created")
       .forEach((item) => {
         const createdAt = parseISO(item.created_at);
-        if (Number.isNaN(createdAt.getTime()) || isBefore(createdAt, since)) return;
+        if (Number.isNaN(createdAt.getTime()) || isBefore(createdAt, rangeStart)) return;
 
         const title = item.title.trim() || "Untitled task";
         const key = title.toLowerCase().replace(/\s+/g, " ");
@@ -319,15 +363,19 @@ const SmartStatistics = () => {
     return [...grouped.values()]
       .sort((a, b) => b.latest.getTime() - a.latest.getTime())
       .slice(0, 6);
-  }, [taskHistory]);
+  }, [rangeStart, taskHistory]);
 
   const busiestDay = useMemo(() => {
     const busiest = dailyLoad.reduce((best, day) => (day.hours > best.hours ? day : best), dailyLoad[0]);
     return busiest?.hours ? `${busiest.date}, ${busiest.hours}h` : "No load yet";
   }, [dailyLoad]);
 
-  const avgScore = activityScores.length
-    ? Math.round(activityScores.reduce((total, score) => total + score.health_score, 0) / activityScores.length)
+  const scoresForRange = activityScores.filter((score) => {
+    const created = parseISO(score.created_at);
+    return !Number.isNaN(created.getTime()) && !isBefore(created, rangeStart);
+  });
+  const avgScore = scoresForRange.length
+    ? Math.round(scoresForRange.reduce((total, score) => total + score.health_score, 0) / scoresForRange.length)
     : 0;
 
   return (
@@ -342,21 +390,34 @@ const SmartStatistics = () => {
                 <Sparkles className="h-3.5 w-3.5" />
                 Smart Statistics
               </Badge>
-              <Badge variant="outline">Last 30 days</Badge>
+              <Badge variant="outline">Last {rangeConfig.label}</Badge>
             </div>
             <h1 className="mt-3 text-3xl font-semibold tracking-tight">Your calendar, task, and AI activity overview</h1>
             <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
               A compact read on workload, completion, scheduling habits, and estimated OpenAI API spend.
             </p>
           </div>
-          <Button variant="outline" onClick={() => void fetchRemoteStats()} disabled={!token || isRefreshing}>
-            <TrendingUp className="h-4 w-4" />
-            {isRefreshing ? "Refreshing" : "Refresh"}
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Select value={selectedRange} onValueChange={(value) => setSelectedRange(value as StatisticsRange)}>
+              <SelectTrigger className="h-10 w-[150px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="1d">1 day</SelectItem>
+                <SelectItem value="1w">1 week</SelectItem>
+                <SelectItem value="1m">1 month</SelectItem>
+                <SelectItem value="1y">1 year</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button variant="outline" onClick={() => void fetchRemoteStats()} disabled={!token || isRefreshing}>
+              <TrendingUp className="h-4 w-4" />
+              {isRefreshing ? "Refreshing" : "Refresh"}
+            </Button>
+          </div>
         </div>
 
         <section className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <StatTile icon={CheckCircle2} label="Completion rate" value={formatPercent(stats.completionRate)} helper={`${tasks.filter((task) => task.completed).length} of ${tasks.length} tasks done`} />
+          <StatTile icon={CheckCircle2} label="Completion rate" value={formatPercent(stats.completionRate)} helper={`${rangeTasks.filter((task) => task.completed).length} of ${rangeTasks.length} tasks done`} />
           <StatTile icon={CalendarDays} label="Upcoming week" value={String(stats.upcoming)} helper={`${stats.overdue} overdue tasks need attention`} />
           <StatTile icon={Clock3} label="Scheduled workload" value={`${stats.totalHours.toFixed(1)}h`} helper={`${stats.avgTasksPerDay.toFixed(1)} tasks per active day`} />
           <StatTile icon={DollarSign} label="AI API cost" value={formatMoney(aiUsage?.totals.estimated_cost_usd ?? 0)} helper={`${formatNumber(aiUsage?.totals.total_tokens ?? 0)} tokens across ${aiUsage?.totals.calls ?? 0} calls`} />
@@ -377,16 +438,29 @@ const SmartStatistics = () => {
 
           <ChartPanel title="Task Categories">
             {categoryMix.length ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={categoryMix} dataKey="hours" nameKey="name" innerRadius={56} outerRadius={86} paddingAngle={2}>
-                    {categoryMix.map((entry) => (
-                      <Cell key={entry.name} fill={entry.color} />
-                    ))}
-                  </Pie>
-                  <Tooltip />
-                </PieChart>
-              </ResponsiveContainer>
+              <div className="grid h-full gap-3 sm:grid-cols-[minmax(0,1fr)_150px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie data={categoryMix} dataKey="hours" nameKey="name" innerRadius={50} outerRadius={78} paddingAngle={2}>
+                      {categoryMix.map((entry) => (
+                        <Cell key={entry.name} fill={entry.color} />
+                      ))}
+                    </Pie>
+                    <Tooltip />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="flex min-h-0 flex-col justify-center gap-2 overflow-y-auto pr-1">
+                  {categoryMix.map((entry) => (
+                    <div key={entry.name} className="flex items-center justify-between gap-2 text-xs">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: entry.color }} />
+                        <span className="truncate">{entry.name}</span>
+                      </span>
+                      <span className="shrink-0 text-muted-foreground">{entry.hours}h</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
             ) : (
               <div className="flex h-full items-center justify-center text-sm text-muted-foreground">No task categories yet.</div>
             )}
@@ -438,7 +512,7 @@ const SmartStatistics = () => {
                 <span className="font-semibold">{taskHistorySummary.created}/{taskHistorySummary.updated}/{taskHistorySummary.deleted}</span>
               </div>
             </div>
-            <p className="mt-4 text-xs text-muted-foreground">Task edits are shown as created, updated, and deleted events from the last 30 days.</p>
+            <p className="mt-4 text-xs text-muted-foreground">Task edits are shown as created, updated, and deleted events from the selected range.</p>
           </section>
         </section>
 

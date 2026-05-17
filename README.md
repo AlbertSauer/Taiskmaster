@@ -31,11 +31,16 @@ Taiskmaster is a React + Vite + TypeScript + Tailwind frontend with a Flask back
   - recommendation filtering that avoids overlapping existing calendar tasks.
 - Smart Routine:
   - work + personal routine questionnaire,
+  - preferred workout time for generated workout sessions,
+  - work hours are represented only by configured `Work Hours` / `Work Break` blocks,
+  - overnight `Sleep` tasks are generated from sleep time to wake time so sleep appears in activity views,
   - preview and edit before save,
   - saved routine profiles reusable from `Options -> Profile -> Profile tools`,
   - searchable saved routine list.
 - Smart Statistics:
+  - selectable timeframe: 1 day, 1 week, 1 month, or 1 year,
   - calendar workload and category charts,
+  - category chart includes a side legend showing which color represents each task category,
   - free time shown in the category pie (green) and work shown in black,
   - activity score trend,
   - grouped calendar movement showing how many times the same task was added,

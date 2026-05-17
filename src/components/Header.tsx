@@ -45,7 +45,9 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
     email: "",
     username: "",
     full_name: "",
+    current_password: "",
     password: "",
+    confirm_password: "",
   });
 
   useEffect(() => {
@@ -90,7 +92,9 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
       email: user?.email || "",
       username: user?.username || "",
       full_name: user?.full_name || "",
+      current_password: "",
       password: "",
+      confirm_password: "",
     });
     setProfileOpen(true);
   };
@@ -101,7 +105,9 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
         email: user?.email || "",
         username: user?.username || "",
         full_name: user?.full_name || "",
+        current_password: "",
         password: "",
+        confirm_password: "",
       });
       setProfileOpen(true);
     };
@@ -113,11 +119,29 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
     if (!user) return;
     try {
       setProfileSaving(true);
+      const wantsPasswordChange = Boolean(profileForm.password.trim() || profileForm.confirm_password.trim() || profileForm.current_password.trim());
+      if (wantsPasswordChange) {
+        if (!profileForm.current_password.trim()) {
+          toast.error("Enter your current password before changing it.");
+          return;
+        }
+        if (profileForm.password.trim().length < 8) {
+          toast.error("New password must be at least 8 characters.");
+          return;
+        }
+        if (profileForm.password.trim() !== profileForm.confirm_password.trim()) {
+          toast.error("New password confirmation does not match.");
+          return;
+        }
+      }
       await updateProfile({
         email: profileForm.email.trim(),
         username: profileForm.username.trim(),
         full_name: profileForm.full_name.trim(),
-        ...(profileForm.password.trim() ? { password: profileForm.password.trim() } : {}),
+        ...(wantsPasswordChange ? {
+          current_password: profileForm.current_password,
+          password: profileForm.password.trim(),
+        } : {}),
       });
       toast.success("Profile updated");
       setProfileOpen(false);
@@ -220,29 +244,29 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
                   {!mounted ? "Theme mode" : isDark ? "Light mode" : "Dark mode"}
                 </DropdownMenuItem>
                 <DropdownMenuSub>
-                  <DropdownMenuSubTrigger>
+                  <DropdownMenuSubTrigger className="hover:bg-accent hover:text-accent-foreground">
                     <Palette className="mr-2 h-4 w-4" />
-                    Colors
+                    Designs
                   </DropdownMenuSubTrigger>
                   <DropdownMenuSubContent sideOffset={6} alignOffset={-4} className="w-44">
-                    <DropdownMenuItem onSelect={() => applyStyle("blue")} aria-label="Blue style">
-                      <Palette className="mr-2 h-4 w-4" />
-                      Blue {styleMode === "blue" ? "✓" : ""}
+                    <DropdownMenuItem onSelect={() => applyStyle("blue")} aria-label="Violet style">
+                      <div className="mr-2 h-4 w-4 rounded-full bg-violet-500" />
+                      Violet {styleMode === "blue" ? "✓" : ""}
                     </DropdownMenuItem>
                     <DropdownMenuItem onSelect={() => applyStyle("green")} aria-label="Green style">
-                      <Palette className="mr-2 h-4 w-4" />
+                      <div className="mr-2 h-4 w-4 rounded-full bg-green-500" />
                       Green {styleMode === "green" ? "✓" : ""}
                     </DropdownMenuItem>
                     <DropdownMenuItem onSelect={() => applyStyle("pink")} aria-label="Pink style">
-                      <Palette className="mr-2 h-4 w-4" />
+                      <div className="mr-2 h-4 w-4 rounded-full bg-pink-500" />
                       Pink {styleMode === "pink" ? "✓" : ""}
                     </DropdownMenuItem>
                     <DropdownMenuItem onSelect={() => applyStyle("red")} aria-label="Red style">
-                      <Palette className="mr-2 h-4 w-4" />
-                      Red {styleMode === "red" ? "✓" : ""}
+                      <div className="mr-2 h-4 w-4 rounded-full bg-orange-500" />
+                      Orange {styleMode === "red" ? "✓" : ""}
                     </DropdownMenuItem>
                     <DropdownMenuItem onSelect={() => applyStyle("grey")} aria-label="Grey style">
-                      <Palette className="mr-2 h-4 w-4" />
+                      <div className="mr-2 h-4 w-4 rounded-full bg-gray-500" />
                       Grey {styleMode === "grey" ? "✓" : ""}
                     </DropdownMenuItem>
                   </DropdownMenuSubContent>
@@ -364,6 +388,17 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
               </div>
             </div>
             <div className="space-y-2">
+              <Label htmlFor="profile-current-password">Current password</Label>
+              <Input
+                id="profile-current-password"
+                type="password"
+                value={profileForm.current_password}
+                onChange={(e) => setProfileForm((current) => ({ ...current, current_password: e.target.value }))}
+                placeholder="Required to change password"
+                disabled={profileSaving}
+              />
+            </div>
+            <div className="space-y-2">
               <Label htmlFor="profile-password">New password</Label>
               <Input
                 id="profile-password"
@@ -371,6 +406,17 @@ export const Header = ({ onOptimize, onNewTask, onImportCalendar, onDeleteCalend
                 value={profileForm.password}
                 onChange={(e) => setProfileForm((current) => ({ ...current, password: e.target.value }))}
                 placeholder="Leave empty to keep current password"
+                disabled={profileSaving}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="profile-confirm-password">Confirm new password</Label>
+              <Input
+                id="profile-confirm-password"
+                type="password"
+                value={profileForm.confirm_password}
+                onChange={(e) => setProfileForm((current) => ({ ...current, confirm_password: e.target.value }))}
+                placeholder="Repeat new password"
                 disabled={profileSaving}
               />
             </div>

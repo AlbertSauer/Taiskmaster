@@ -47,8 +47,8 @@ const SmartRoutine = () => {
   const [breakTwoDuration, setBreakTwoDuration] = useState("15");
   const [workoutPerWeek, setWorkoutPerWeek] = useState("3");
   const [workoutDuration, setWorkoutDuration] = useState("60");
+  const [preferredWorkoutTime, setPreferredWorkoutTime] = useState("17:30");
   const [learningMinutesPerWeek, setLearningMinutesPerWeek] = useState("180");
-  const [selfcareMinutesPerWeek, setSelfcareMinutesPerWeek] = useState("120");
   const [workingDays, setWorkingDays] = useState<string[]>(["monday", "tuesday", "wednesday", "thursday", "friday"]);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewTasks, setPreviewTasks] = useState<RoutineTask[]>([]);
@@ -67,8 +67,8 @@ const SmartRoutine = () => {
       if (typeof data.energy_peak_time === "string") setEnergyPeakTime(data.energy_peak_time);
       if (typeof data.workout_per_week === "number") setWorkoutPerWeek(String(data.workout_per_week));
       if (typeof data.workout_duration === "number") setWorkoutDuration(String(data.workout_duration));
+      if (typeof data.preferred_workout_time === "string") setPreferredWorkoutTime(data.preferred_workout_time);
       if (typeof data.learning_minutes_per_week === "number") setLearningMinutesPerWeek(String(data.learning_minutes_per_week));
-      if (typeof data.selfcare_minutes_per_week === "number") setSelfcareMinutesPerWeek(String(data.selfcare_minutes_per_week));
       if (Array.isArray(data.work_breaks) && data.work_breaks.length > 0) {
         const first = data.work_breaks[0] as { time?: string; duration?: number };
         if (first?.time) setBreakOneTime(first.time);
@@ -131,8 +131,8 @@ const SmartRoutine = () => {
             ],
             workout_per_week: Number(workoutPerWeek),
             workout_duration: Number(workoutDuration || 60),
+            preferred_workout_time: preferredWorkoutTime,
             learning_minutes_per_week: Number(learningMinutesPerWeek),
-            selfcare_minutes_per_week: Number(selfcareMinutesPerWeek),
           },
           existing_tasks: tasks.map((task) => ({
             id: task.id,
@@ -327,8 +327,8 @@ const SmartRoutine = () => {
                 </div>
 
                 <div className="space-y-2">
-                  <Label>Selfcare minutes per week</Label>
-                  <Input type="number" min={0} max={1200} value={selfcareMinutesPerWeek} onChange={(e) => setSelfcareMinutesPerWeek(e.target.value)} />
+                  <Label>Preferred workout time</Label>
+                  <Input type="time" value={preferredWorkoutTime} onChange={(e) => setPreferredWorkoutTime(e.target.value)} />
                 </div>
 
               </div>

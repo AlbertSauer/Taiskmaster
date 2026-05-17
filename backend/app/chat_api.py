@@ -1314,6 +1314,38 @@ def _build_workday_blocks(day, day_date, work_start_time, work_end_time, work_br
     return blocks
 
 
+def _sleep_duration_minutes(sleep_time, wake_time):
+    sleep_minutes = _time_to_minutes(sleep_time)
+    wake_minutes = _time_to_minutes(wake_time)
+    if wake_minutes <= sleep_minutes:
+        wake_minutes += 24 * 60
+    return max(15, min(24 * 60, wake_minutes - sleep_minutes))
+
+
+def _build_sleep_blocks(start_date, end_date, sleep_time, wake_time):
+    sleep_time = _normalize_task_time(sleep_time or "23:00")
+    wake_time = _normalize_task_time(wake_time or "07:00")
+    duration = _sleep_duration_minutes(sleep_time, wake_time)
+    parsed_end_date = _parse_routine_end_date(end_date)
+    tasks = []
+    cursor = start_date
+
+    while cursor <= parsed_end_date and len(tasks) < 366:
+        date_value = cursor.strftime("%Y-%m-%d")
+        tasks.append(_routine_task(
+            title="Sleep",
+            date=date_value,
+            time=sleep_time,
+            duration=duration,
+            priority="low",
+            tags=["routine", "sleep", "rest"],
+            description=f"Sleep block from {sleep_time} to {wake_time}.",
+        ))
+        cursor += timedelta(days=1)
+
+    return tasks
+
+
 def _generate_routine_fallback(end_date, questionnaire):
     working_days = questionnaire.get("working_days") or ["monday", "tuesday", "wednesday", "thursday", "friday"]
     if not isinstance(working_days, list) or not working_days:
@@ -1324,15 +1356,15 @@ def _generate_routine_fallback(end_date, questionnaire):
 
     energy_peak_time = _normalize_task_time(questionnaire.get("energy_peak_time") or "10:00")
     learning_minutes_per_week = max(0, min(1200, int(questionnaire.get("learning_minutes_per_week") or 180)))
-    selfcare_minutes_per_week = max(0, min(1200, int(questionnaire.get("selfcare_minutes_per_week") or 120)))
     workout_per_week = max(0, min(7, int(questionnaire.get("workout_per_week") or 3)))
     workout_duration = max(15, min(180, int(questionnaire.get("workout_duration") or 60)))
+    preferred_workout_time = _normalize_task_time(questionnaire.get("preferred_workout_time") or "17:30")
+    sleep_time = _normalize_task_time(questionnaire.get("sleep_time") or "23:00")
+    wake_time = _normalize_task_time(questionnaire.get("wake_time") or "07:00")
     work_start_time = _normalize_task_time(questionnaire.get("work_start_time") or "09:00")
     work_end_time = _normalize_task_time(questionnaire.get("work_end_time") or "17:00")
     work_breaks = _normalize_work_breaks(questionnaire)
 
-    focus_time = energy_peak_time
-    auto_break_duration = 20
     per_day_learning = 0
     if len(working_days) > 0:
         per_day_learning = int(round(learning_minutes_per_week / len(working_days)))
@@ -1353,6 +1385,7 @@ def _generate_routine_fallback(end_date, questionnaire):
 
     parsed_end_date = _parse_routine_end_date(end_date)
     max_weeks = 52
+    tasks.extend(_build_sleep_blocks(start_date, end_date, sleep_time, wake_time))
 
     for week in range(max_weeks):
         week_has_tasks = False
@@ -1363,24 +1396,6 @@ def _generate_routine_fallback(end_date, questionnaire):
                 continue
             week_has_tasks = True
             tasks.extend(_build_workday_blocks(day, day_date, work_start_time, work_end_time, work_breaks))
-            tasks.append(_routine_task(
-                title="Deep Work Block",
-                date=day_date,
-                time=focus_time if _time_to_minutes(focus_time) >= _time_to_minutes(work_start_time) else work_start_time,
-                duration=90,
-                priority="high",
-                tags=["routine", "focus", day],
-                description="Protected deep-focus block for high-value work.",
-            ))
-            tasks.append(_routine_task(
-                title="Recovery Break",
-                date=day_date,
-                time="12:30",
-                duration=auto_break_duration,
-                priority="medium",
-                tags=["routine", "break", day],
-                description="Recommended recovery break to avoid burnout.",
-            ))
             if learning_duration > 0:
                 tasks.append(_routine_task(
                     title="Learning Session",
@@ -1402,29 +1417,11 @@ def _generate_routine_fallback(end_date, questionnaire):
                 tasks.append(_routine_task(
                     title="Workout Session",
                     date=day_date,
-                    time="17:30",
+                    time=preferred_workout_time,
                     duration=workout_duration,
                     priority="medium",
                     tags=["routine", "health", "sports", day],
-                    description="Scheduled movement block for energy and recovery.",
-                ))
-
-        if selfcare_minutes_per_week > 0:
-            selfcare_days = sorted_workdays[:max(1, min(len(sorted_workdays), 3))]
-            per_session = max(15, min(90, int(round(selfcare_minutes_per_week / len(selfcare_days)))))
-            for day in selfcare_days:
-                day_date = _date_for_weekday(start_date, day, week)
-                day_date_obj = datetime.strptime(day_date, "%Y-%m-%d").date()
-                if day_date_obj > parsed_end_date:
-                    continue
-                tasks.append(_routine_task(
-                    title="Selfcare Time",
-                    date=day_date,
-                    time="20:30",
-                    duration=per_session,
-                    priority="medium",
-                    tags=["routine", "selfcare", day],
-                    description="Personal selfcare block based on your weekly target.",
+                    description="Scheduled movement block at your preferred workout time.",
                 ))
 
         planning_day = "sunday" if "sunday" in WEEKDAY_LOOKUP else "friday"
@@ -1568,7 +1565,14 @@ def _ensure_work_blocks_for_all_workdays(current_tasks, questionnaire, end_date,
         date_value = _normalize_iso_date(task.get("date"))
         tags = task.get("tags") if isinstance(task.get("tags"), list) else []
         normalized_tags = {str(tag).strip().lower() for tag in tags}
-        is_work_related = "work" in normalized_tags or "work-break" in normalized_tags or str(task.get("title") or "").strip().lower().startswith("work break") or str(task.get("title") or "").strip().lower() == "work hours"
+        title = str(task.get("title") or "").strip().lower()
+        is_work_related = (
+            "work" in normalized_tags
+            or "work-break" in normalized_tags
+            or "focus" in normalized_tags
+            or title.startswith("work break")
+            or title in {"work hours", "deep work block"}
+        )
         if date_value in working_dates and is_work_related:
             continue
         preserved_tasks.append(task)
@@ -1585,6 +1589,29 @@ def _ensure_work_blocks_for_all_workdays(current_tasks, questionnaire, end_date,
     return deduped
 
 
+def _ensure_sleep_blocks_for_period(current_tasks, questionnaire, end_date):
+    sleep_time = _normalize_task_time(questionnaire.get("sleep_time") or "23:00")
+    wake_time = _normalize_task_time(questionnaire.get("wake_time") or "07:00")
+    start_date = _routine_start_date()
+    enforced_sleep_tasks = _build_sleep_blocks(start_date, end_date, sleep_time, wake_time)
+    sleep_dates = {task["date"] for task in enforced_sleep_tasks}
+
+    preserved_tasks = []
+    for task in (current_tasks or []):
+        if not isinstance(task, dict):
+            continue
+        date_value = _normalize_iso_date(task.get("date"))
+        tags = task.get("tags") if isinstance(task.get("tags"), list) else []
+        normalized_tags = {str(tag).strip().lower() for tag in tags}
+        title = str(task.get("title") or "").strip().lower()
+        is_sleep = "sleep" in normalized_tags or title == "sleep"
+        if date_value in sleep_dates and is_sleep:
+            continue
+        preserved_tasks.append(task)
+
+    return preserved_tasks + enforced_sleep_tasks
+
+
 def _enforce_routine_time_relations(tasks, questionnaire):
     if not isinstance(tasks, list):
         return []
@@ -1597,6 +1624,7 @@ def _enforce_routine_time_relations(tasks, questionnaire):
 
     wake_time = _normalize_task_time(questionnaire.get("wake_time") or "07:00")
     work_start_time = _normalize_task_time(questionnaire.get("work_start_time") or "09:00")
+    preferred_workout_time = _normalize_task_time(questionnaire.get("preferred_workout_time") or "17:30")
     wake_minutes = _time_to_minutes(wake_time)
     work_start_minutes = _time_to_minutes(work_start_time)
     if work_start_minutes <= wake_minutes:
@@ -1622,6 +1650,16 @@ def _enforce_routine_time_relations(tasks, questionnaire):
             or title.startswith("work break")
             or title in {"work hours", "deep work block"}
         )
+        is_workout_activity = (
+            "sports" in normalized_tags
+            or "health" in normalized_tags
+            or title in {"workout session", "workout", "gym", "training"}
+            or "workout" in title
+            or "gym" in title
+        )
+
+        if is_workout_activity:
+            task["time"] = preferred_workout_time
 
         if is_work_activity and weekday in working_days:
             current_time = _normalize_task_time(task.get("time"))
@@ -2102,6 +2140,9 @@ def routine_plan():
                 f"Existing tasks:\n{_build_task_context(existing_tasks) or '- none'}\n"
                 "Return strict JSON with key tasks as an array. "
                 "Each task must include: title, description, date(YYYY-MM-DD), time(HH:MM), duration(minutes), location, priority, tags(array), completed(false). "
+                "Do not create extra work, focus, or deep-work tasks besides the configured Work Hours and Work Break blocks because work hours already represent time at work. "
+                "Create Sleep tasks from sleep_time to wake_time so sleep appears as an activity. "
+                "Schedule workout or sports tasks at preferred_workout_time from the questionnaire whenever possible. "
                 "Generate a realistic working routine for the full period and avoid obvious overlaps inside the generated routine."
             )
             completion = client.chat.completions.create(
@@ -2145,6 +2186,7 @@ def routine_plan():
     if not final_tasks:
         final_tasks = fallback_tasks[:40]
     final_tasks = _ensure_work_blocks_for_all_workdays(final_tasks, questionnaire, end_date, existing_tasks)
+    final_tasks = _ensure_sleep_blocks_for_period(final_tasks, questionnaire, end_date)
     final_tasks = _enforce_routine_time_relations(final_tasks, questionnaire)
     final_tasks = _fit_and_dedupe_routine_tasks(final_tasks, existing_tasks)
     vacation_dates = _extract_vacation_dates(existing_tasks)

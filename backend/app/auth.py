@@ -55,7 +55,7 @@ def register():
     if not all([email, username, password]):
         return jsonify({"detail": "Email, username, and password are required"}), 400
 
-    User, db, _, get_password_hash, create_access_token, _ = get_models()
+    User, db, verify_password, get_password_hash, create_access_token, _ = get_models()
 
     # Check if user already exists
     existing_user = db.session.query(User).filter(
@@ -149,6 +149,7 @@ def update_current_user():
     username = data.get("username")
     full_name = data.get("full_name")
     password = data.get("password")
+    current_password = data.get("current_password")
 
     if email is not None:
         email = str(email).strip()
@@ -174,6 +175,11 @@ def update_current_user():
 
     if password is not None:
         password = str(password)
+        current_password = str(current_password or "")
+        if not current_password:
+            return jsonify({"detail": "Current password is required to change password"}), 400
+        if not verify_password(current_password, user.hashed_password):
+            return jsonify({"detail": "Current password is incorrect"}), 401
         if len(password) < 8:
             return jsonify({"detail": "Password must be at least 8 characters"}), 400
         user.hashed_password = get_password_hash(password)

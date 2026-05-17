@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Sparkles, Search, ArrowDownUp, CheckCircle2, Calendar as CalIcon, MapPin, HeartHandshake, Dumbbell, RefreshCcw, BookOpen, Brain, GraduationCap, Smile, X, Activity } from "lucide-react";
+import { Sparkles, Search, ArrowDownUp, CheckCircle2, Calendar as CalIcon, MapPin, HeartHandshake, Dumbbell, RefreshCcw, BookOpen, Brain, GraduationCap, Smile, X, Activity, LayoutGrid, List } from "lucide-react";
 import { Header } from "@/components/Header";
 import { TaskCard } from "@/components/TaskCard";
 import { TaskDialog } from "@/components/TaskDialog";
@@ -25,6 +25,7 @@ import {
   moveTasksOutsideProtectedWork,
 } from "@/lib/scheduleGuards";
 import { useAuth } from "@/hooks/useAuth";
+import { cn } from "@/lib/utils";
 import type { SortMode, Task } from "@/types/task";
 import { addDays, format, isBefore, isSameDay, isToday, parseISO, startOfDay } from "date-fns";
 import { useNavigate } from "react-router-dom";
@@ -101,6 +102,7 @@ interface OptimizeConflictSuggestion {
   suggestionTime: string;
 }
 type OptimizeScopeChoice = "today" | "tomorrow" | "selected" | "custom" | "next7" | "range" | "all";
+type DashboardTaskView = "cards" | "list";
 interface OptimizeScope {
   kind: "all" | "date" | "range";
   start?: string;
@@ -229,6 +231,7 @@ const Index = () => {
   const { tasks, addTask, updateTask, deleteTask, deleteCalendar, replaceAll, toggleComplete } = useTasks();
   const [sort, setSort] = useState<SortMode>("datetime");
   const [query, setQuery] = useState("");
+  const [dashboardTaskView, setDashboardTaskView] = useState<DashboardTaskView>("cards");
   const [selectedDate, setSelectedDate] = useState<Date | undefined>(new Date());
   const [dateFilter, setDateFilter] = useState("");
   const [markingDayDone, setMarkingDayDone] = useState(false);
@@ -1089,6 +1092,33 @@ const Index = () => {
             </SelectContent>
           </Select>
 
+          <div className="flex h-10 overflow-hidden rounded-md border border-border bg-card p-1">
+            <Button
+              type="button"
+              variant={dashboardTaskView === "cards" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setDashboardTaskView("cards")}
+              className="h-8 gap-1.5 px-2"
+              aria-pressed={dashboardTaskView === "cards"}
+              title="Show task cards"
+            >
+              <LayoutGrid className="h-4 w-4" />
+              <span className="hidden sm:inline">Cards</span>
+            </Button>
+            <Button
+              type="button"
+              variant={dashboardTaskView === "list" ? "secondary" : "ghost"}
+              size="sm"
+              onClick={() => setDashboardTaskView("list")}
+              className="h-8 gap-1.5 px-2"
+              aria-pressed={dashboardTaskView === "list"}
+              title="Show task list"
+            >
+              <List className="h-4 w-4" />
+              <span className="hidden sm:inline">List</span>
+            </Button>
+          </div>
+
           {(selectedDate || dateFilter) && (
             <Button variant="ghost" size="sm" onClick={() => {
               setSelectedDate(undefined);
@@ -1114,6 +1144,13 @@ const Index = () => {
 
         {visible.length === 0 ? (
           <EmptyState onCreate={handleNew} hasFilters={!!query || !!selectedDate} />
+        ) : dashboardTaskView === "list" ? (
+          <TaskDayList
+            tasks={visible}
+            onEdit={handleEdit}
+            onDelete={(id) => { deleteTask(id); toast.success("Task deleted"); }}
+            onToggle={toggleComplete}
+          />
         ) : (
           <div className="grid gap-3 sm:grid-cols-2 animate-fade-in">
             {visible.map((t) => (
@@ -1544,6 +1581,95 @@ const EmptyState = ({ onCreate, hasFilters }: { onCreate: () => void; hasFilters
         Create a task
       </Button>
     )}
+  </div>
+);
+
+const formatListTimeRange = (task: Task) => {
+  if (!task.time) return "Any time";
+  const [hour, minute] = task.time.split(":").map(Number);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return task.time;
+  const duration = Math.max(15, task.duration ?? 60);
+  const end = (hour * 60 + minute + duration) % (24 * 60);
+  const endHour = Math.floor(end / 60).toString().padStart(2, "0");
+  const endMinute = (end % 60).toString().padStart(2, "0");
+  return `${task.time} - ${endHour}:${endMinute}`;
+};
+
+const TaskDayList = ({
+  tasks,
+  onEdit,
+  onDelete,
+  onToggle,
+}: {
+  tasks: Task[];
+  onEdit: (task: Task) => void;
+  onDelete: (id: string) => void;
+  onToggle: (id: string) => void;
+}) => (
+  <div className="animate-fade-in overflow-hidden rounded-lg border border-border bg-card shadow-xs">
+    <div className="grid grid-cols-[42px_minmax(0,1fr)_96px_40px] gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground sm:grid-cols-[46px_120px_minmax(0,1fr)_120px_120px_44px]">
+      <span />
+      <span className="hidden sm:block">Time</span>
+      <span>Task</span>
+      <span className="hidden sm:block">Priority</span>
+      <span className="hidden sm:block">Location</span>
+      <span />
+    </div>
+    <div className="divide-y divide-border">
+      {tasks.map((task) => (
+        <div
+          key={task.id}
+          onClick={() => onEdit(task)}
+          className={cn(
+            "grid cursor-pointer grid-cols-[42px_minmax(0,1fr)_96px_40px] gap-2 px-3 py-3 transition-colors hover:bg-muted/40 sm:grid-cols-[46px_120px_minmax(0,1fr)_120px_120px_44px]",
+            task.completed && "opacity-60",
+          )}
+        >
+          <button
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggle(task.id);
+            }}
+            aria-label={task.completed ? "Mark as not done" : "Mark as done"}
+            className={cn(
+              "mt-0.5 flex h-5 w-5 items-center justify-center rounded-full border-2 transition-colors",
+              task.completed ? "border-primary bg-primary text-primary-foreground" : "border-border hover:border-primary",
+            )}
+          >
+            {task.completed && <CheckCircle2 className="h-3 w-3" strokeWidth={3} />}
+          </button>
+
+          <div className="hidden text-sm text-muted-foreground sm:block">{formatListTimeRange(task)}</div>
+
+          <div className="min-w-0">
+            <p className={cn("truncate text-sm font-semibold text-foreground", task.completed && "line-through")}>{task.title}</p>
+            <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-muted-foreground sm:hidden">
+              <span>{formatListTimeRange(task)}</span>
+              <span>{task.priority}</span>
+              {task.location ? <span>{task.location}</span> : null}
+            </div>
+            {task.description ? <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">{task.description}</p> : null}
+            {task.note ? <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">Note: {task.note}</p> : null}
+          </div>
+
+          <div className="hidden text-sm capitalize text-muted-foreground sm:block">{task.priority}</div>
+          <div className="hidden truncate text-sm text-muted-foreground sm:block">{task.location || "-"}</div>
+
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={(event) => {
+              event.stopPropagation();
+              onDelete(task.id);
+            }}
+            className="text-destructive hover:text-destructive"
+            aria-label="Delete task"
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+      ))}
+    </div>
   </div>
 );
 
