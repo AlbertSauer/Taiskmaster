@@ -13,14 +13,20 @@ Taiskmaster is a smart calendar and task manager built with React, Vite, TypeScr
 
 ## Stack
 
-- Frontend: React 18, Vite, TypeScript, Tailwind, Radix UI, Recharts
-- Backend: Flask, Flask-CORS, Flask-SQLAlchemy, Pydantic, JWT auth
-- Database: PostgreSQL 16 via Docker Compose
-- Tooling: ESLint, Vitest, Vite production build
+- React: frontend UI; organized components.
+- Vite: dev server and builds; fast local workflow.
+- TypeScript: frontend type safety; earlier error catching.
+- Tailwind CSS and Radix UI: styling and controls; consistent UI.
+- Recharts and Lucide React: charts and icons; React-friendly visuals.
+- Flask: backend API; lightweight Python server.
+- Flask-SQLAlchemy and Pydantic: database access and validation; safer API data.
+- PostgreSQL with Docker Compose: local database; repeatable setup.
+- JWT: authentication; stateless sessions.
+- OpenAI API: assistant features; natural-language actions.
+- ESLint, Vitest, and Vite build: checks, tests, and production builds.
+- PyCharm, DataGrip, and VS Code: coding and database inspection.
 
 ## Quick Start
-
-For the short copy-paste startup guide, see [LETS_RUN_IT.md](./LETS_RUN_IT.md).
 
 From the project root:
 
